@@ -52,67 +52,54 @@ async function scrapeDosar(numarDosar) {
       const container = document.querySelector(selResults)
       const bodyText = document.body?.innerText ?? ''
 
-      const text = container ? container.innerText : bodyText.slice(0, 5000)
+      const text = bodyText
 
-      // Cauta numere de dosar reale (format NR/COD/AN, nu date)
-      const nrPattern = /\b(\d{1,6}\/\d{2,4}\/\d{4})\b/g
-      const nrMatches = [...text.matchAll(nrPattern)]
-        .map(m => m[1])
-        .filter((v, i, a) => a.indexOf(v) === i)
-        // Filtreaza datele calendaristice (ziua 1-31)
-        .filter(nr => {
-          const parts = nr.split('/')
-          return parseInt(parts[0]) > 31
-        })
+      // Cauta randuri din tabelul de rezultate
+      // Format: Instanta \t NumarDosar \t DataDosar \t Obiect \t Materie \t Stadiu
+      const rezultate = []
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
 
-      function gaseste(pattern) {
-        const m = text.match(pattern)
-        return m ? m[1].trim() : null
+      for (const line of lines) {
+        const parts = line.split('\t').map(p => p.trim()).filter(Boolean)
+        if (parts.length >= 4) {
+          const nrMatch = parts.find(p => /^\d{1,6}\/\d{2,4}\/\d{4}$/.test(p))
+          if (nrMatch) {
+            const idx = parts.indexOf(nrMatch)
+            rezultate.push({
+              numar_dosar: nrMatch,
+              instanta: idx > 0 ? parts[idx - 1] : null,
+              data_dosar: idx + 1 < parts.length ? parts[idx + 1] : null,
+              obiect: idx + 2 < parts.length ? parts[idx + 2] : null,
+              materie: idx + 3 < parts.length ? parts[idx + 3] : null,
+              stadiu: idx + 4 < parts.length ? parts[idx + 4] : null,
+              parti: [],
+              termene_urmatoare: [],
+            })
+          }
+        }
       }
+
+      // Extrage termene (date in format DD.MM.YYYY)
+      const termene = [...text.matchAll(/(\d{2}[.]\d{2}[.]\d{4})/g)]
+        .map(m => m[1]).filter((v, i, a) => a.indexOf(v) === i).slice(0, 5)
 
       return {
         containerGasit: !!container,
-        nrMatches,
-        obiect: gaseste(/[Oo]biect[^:\n]*:\s*([^\n]{3,120})/),
-        instanta: gaseste(/[Ii]nstan[tț][aă][^:\n]*:\s*([^\n]{3,80})/),
-        parti: [...text.matchAll(/(?:Reclamant|Pârât|Parte|Inculpat)[^:\n]*:\s*([A-ZĂÎȘȚÂ][^\n]{2,80})/gi)]
-          .map(m => m[1].trim()).slice(0, 3),
-        termene: [...text.matchAll(/(\d{2}[.]\d{2}[.]\d{4})/g)]
-          .map(m => m[1]).filter((v, i, a) => a.indexOf(v) === i).slice(0, 5),
-        textSnippet: text.slice(0, 1000),
+        rezultate,
+        termene,
+        textSnippet: text.slice(0, 500),
       }
     }, SEL_RESULTS)
 
-    console.log(`[scraper] containerGasit=${pageData.containerGasit} nrMatches=${pageData.nrMatches.length} snippet=${pageData.textSnippet.slice(0,200)}`)
+    console.log(`[scraper] rezultate=${pageData.rezultate.length}`)
 
-    const rezultate = pageData.nrMatches.map(nr => ({
-      numar_dosar: nr,
-      instanta: pageData.instanta,
-      obiect: pageData.obiect,
-      parti: pageData.parti,
+    // Adauga termene la fiecare rezultat
+    const rezultate = pageData.rezultate.map(r => ({
+      ...r,
       termene_urmatoare: pageData.termene,
     }))
 
-    if (rezultate.length === 0 && (pageData.obiect || pageData.instanta)) {
-      rezultate.push({
-        numar_dosar: numarDosar,
-        instanta: pageData.instanta,
-        obiect: pageData.obiect,
-        parti: pageData.parti,
-        termene_urmatoare: pageData.termene,
-      })
-    }
-
-    console.log(`[scraper] Final: ${rezultate.length} rezultate`)
-
-    return {
-      rezultate,
-      debug: {
-        containerGasit: pageData.containerGasit,
-        textSnippet: pageData.textSnippet,
-        nrMatches: pageData.nrMatches,
-      },
-    }
+    return { rezultate }
   } finally {
     await browser.close()
   }
