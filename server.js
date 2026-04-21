@@ -45,53 +45,25 @@ async function scrapeDosar(numarDosar) {
     ])
 
     // Asteapta sa se incarce rezultatele
-    await new Promise(r => setTimeout(r, 2500))
+    await new Promise(r => setTimeout(r, 3000))
 
-    // Extrage datele din tabelul de rezultate
-    const rezultate = await page.evaluate((selResults, numar) => {
+    // Extrage TOT textul din pagina pentru debug + date structurate
+    const pageData = await page.evaluate((selResults) => {
       const container = document.querySelector(selResults)
-      if (!container) return []
+      const bodyText = document.body?.innerText ?? ''
 
-      const rows = container.querySelectorAll('tr.ms-itmhover, tr[class*="itmhover"], tbody tr')
-      const out = []
+      const text = container ? container.innerText : bodyText.slice(0, 5000)
 
-      rows.forEach(row => {
-        const cells = Array.from(row.querySelectorAll('td'))
-          .map(c => c.innerText.trim())
-          .filter(Boolean)
-
-        if (cells.length >= 2) {
-          // Incearca sa extraga campurile relevante din celule
-          const text = cells.join(' | ')
-          const nrMatch = text.match(/\d{1,6}\/\d{2,4}\/\d{4}/)
-          out.push({
-            numar_dosar: nrMatch ? nrMatch[0] : numar,
-            raw: cells,
-          })
-        }
-      })
-
-      // Daca nu am gasit rows structurate, extrage tot textul
-      if (out.length === 0) {
-        const allText = container.innerText
-        const nrMatches = [...allText.matchAll(/\d{1,6}\/\d{2,4}\/\d{4}/g)]
-          .map(m => m[0])
-          .filter((v, i, a) => a.indexOf(v) === i)
-
-        nrMatches.forEach(nr => {
-          out.push({ numar_dosar: nr, raw: [] })
+      // Cauta numere de dosar reale (format NR/COD/AN, nu date)
+      const nrPattern = /\b(\d{1,6}\/\d{2,4}\/\d{4})\b/g
+      const nrMatches = [...text.matchAll(nrPattern)]
+        .map(m => m[1])
+        .filter((v, i, a) => a.indexOf(v) === i)
+        // Filtreaza datele calendaristice (ziua 1-31)
+        .filter(nr => {
+          const parts = nr.split('/')
+          return parseInt(parts[0]) > 31
         })
-      }
-
-      return out
-    }, SEL_RESULTS, numarDosar)
-
-    // Extrage si date structurate din pagina
-    const dateStructurate = await page.evaluate((selResults) => {
-      const container = document.querySelector(selResults)
-      if (!container) return null
-
-      const text = container.innerText
 
       function gaseste(pattern) {
         const m = text.match(pattern)
@@ -99,27 +71,47 @@ async function scrapeDosar(numarDosar) {
       }
 
       return {
+        containerGasit: !!container,
+        nrMatches,
         obiect: gaseste(/[Oo]biect[^:\n]*:\s*([^\n]{3,120})/),
         instanta: gaseste(/[Ii]nstan[tț][aă][^:\n]*:\s*([^\n]{3,80})/),
         parti: [...text.matchAll(/(?:Reclamant|Pârât|Parte|Inculpat)[^:\n]*:\s*([A-ZĂÎȘȚÂ][^\n]{2,80})/gi)]
           .map(m => m[1].trim()).slice(0, 3),
-        termene: [...text.matchAll(/(\d{2}[.\-/]\d{2}[.\-/]\d{4})/g)]
-          .map(m => m[1]).slice(0, 5),
-        textComplet: text.slice(0, 2000),
+        termene: [...text.matchAll(/(\d{2}[.]\d{2}[.]\d{4})/g)]
+          .map(m => m[1]).filter((v, i, a) => a.indexOf(v) === i).slice(0, 5),
+        textSnippet: text.slice(0, 1000),
       }
     }, SEL_RESULTS)
 
-    console.log(`[scraper] Rezultate: ${rezultate.length}, date: ${JSON.stringify(dateStructurate?.obiect)}`)
+    console.log(`[scraper] containerGasit=${pageData.containerGasit} nrMatches=${pageData.nrMatches.length} snippet=${pageData.textSnippet.slice(0,200)}`)
+
+    const rezultate = pageData.nrMatches.map(nr => ({
+      numar_dosar: nr,
+      instanta: pageData.instanta,
+      obiect: pageData.obiect,
+      parti: pageData.parti,
+      termene_urmatoare: pageData.termene,
+    }))
+
+    if (rezultate.length === 0 && (pageData.obiect || pageData.instanta)) {
+      rezultate.push({
+        numar_dosar: numarDosar,
+        instanta: pageData.instanta,
+        obiect: pageData.obiect,
+        parti: pageData.parti,
+        termene_urmatoare: pageData.termene,
+      })
+    }
+
+    console.log(`[scraper] Final: ${rezultate.length} rezultate`)
 
     return {
-      rezultate: rezultate.map(r => ({
-        numar_dosar: r.numar_dosar,
-        instanta: dateStructurate?.instanta ?? null,
-        obiect: dateStructurate?.obiect ?? null,
-        parti: dateStructurate?.parti ?? [],
-        termene_urmatoare: dateStructurate?.termene ?? [],
-      })),
-      debug: dateStructurate?.textComplet,
+      rezultate,
+      debug: {
+        containerGasit: pageData.containerGasit,
+        textSnippet: pageData.textSnippet,
+        nrMatches: pageData.nrMatches,
+      },
     }
   } finally {
     await browser.close()
