@@ -1,8 +1,14 @@
 const express = require('express')
 const puppeteer = require('puppeteer-core')
+const cron = require('node-cron')
+const { createClient } = require('@supabase/supabase-js')
 
 const app = express()
 app.use(express.json())
+
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  : null
 
 const PORTAL_URL = 'https://portal.just.ro/SitePages/dosare.aspx'
 
@@ -237,6 +243,77 @@ app.post('/cauta-dosar', async (req, res) => {
     res.json({ rezultate: [], error: err.message })
   }
 })
+
+// ─── Sync automat Supabase ────────────────────────────────────────────────────
+
+async function syncAllDosare() {
+  if (!supabase) { console.log('[cron] Supabase neconfigurat — skip'); return }
+  console.log('[cron] Incep sync dosare...')
+
+  const { data: dosare, error } = await supabase
+    .from('dosare')
+    .select('id, numar_dosar, instanta, avocat_id')
+    .in('status', ['activ', 'suspendat'])
+
+  if (error || !dosare?.length) {
+    console.log('[cron] Eroare sau niciun dosar:', error?.message ?? 'lista goala')
+    return
+  }
+
+  console.log(`[cron] ${dosare.length} dosare de sincronizat`)
+  const today = new Date().toISOString().split('T')[0]
+
+  for (const dosar of dosare) {
+    try {
+      const result = await scrapeDosar(dosar.numar_dosar)
+      const termeneNoi = result.rezultate?.[0]?.termene_urmatoare ?? []
+
+      for (const dataRaw of termeneNoi) {
+        const [dd, mm, yyyy] = dataRaw.split('.')
+        if (!dd || !mm || !yyyy) continue
+        const dataTermen = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`
+        if (dataTermen < today) continue
+
+        const { data: existent } = await supabase
+          .from('termene')
+          .select('id')
+          .eq('dosar_id', dosar.id)
+          .eq('data_termen', dataTermen)
+          .maybeSingle()
+
+        if (existent) continue
+
+        await supabase.from('termene').insert({
+          avocat_id: dosar.avocat_id,
+          dosar_id: dosar.id,
+          data_termen: dataTermen,
+          tip: 'termen_judecata',
+          status: 'programat',
+          instanta: dosar.instanta ?? null,
+          ora: null, sala: null, notes: null,
+          notificare_trimisa: false,
+        })
+      }
+
+      console.log(`[cron] ${dosar.numar_dosar}: ${termeneNoi.length} termene procesate`)
+    } catch (e) {
+      console.log(`[cron] Eroare ${dosar.numar_dosar}:`, e.message)
+    }
+  }
+
+  console.log('[cron] Sync complet')
+}
+
+// Endpoint manual pentru trigger din afara
+app.post('/sync-now', async (_req, res) => {
+  res.json({ ok: true, message: 'Sync pornit in background' })
+  syncAllDosare()
+})
+
+// Cron: 12:30 si 18:30 ora Romaniei (Europe/Bucharest)
+cron.schedule('30 12 * * *', syncAllDosare, { timezone: 'Europe/Bucharest' })
+cron.schedule('30 18 * * *', syncAllDosare, { timezone: 'Europe/Bucharest' })
+console.log('[cron] Programat: 12:30 si 18:30 Europe/Bucharest')
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
