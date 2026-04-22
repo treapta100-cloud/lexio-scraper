@@ -175,65 +175,36 @@ async function scrapeParti(page, numarDosar, selResults) {
       const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
 
       const result = []
-      let inPartiSection = false
 
-      // Normalizeaza diacritice pentru comparatie
-      function norm(s) {
-        return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim()
-      }
-
+      // Detecteaza header-ul tabelului de parti: "Nume    Calitate parte"
+      // Acesta apare o singura data, dupa sectiunea de navigare
+      let headerIdx = -1
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
-        const n = norm(line)
-
-        // Detecteaza inceputul sectiunii Parti (cu sau fara diacritice)
-        if (n === 'parti' || n === 'partile' || n === 'parti in dosar') {
-          inPartiSection = true
-          continue
-        }
-
-        if (inPartiSection) {
-          // Sari linia de header tabel
-          if (n.includes('calitate') || n === 'nume') continue
-
-          // Opreste la urmatoarea sectiune
-          if (
-            n.includes('sedint') || n.includes('seding') ||
-            n.includes('cai atac') || n.includes('caile de atac') ||
-            n.includes('citare') || n.includes('informatii')
-          ) break
-
-          // Extrage numele — format "Agachi Adi    Condamnat" → ia ce e inainte de 2+ spatii
-          const name = line.split(/\s{2,}|\t/)[0].trim()
-          if (
-            name.length >= 3 &&
-            name.length <= 80 &&
-            !/^\d+$/.test(name) &&
-            !result.includes(name)
-          ) {
-            result.push(name)
-          }
+        const l = lines[i].toLowerCase()
+        if (l.includes('calitate parte') || l.includes('calitate\tparte') || (l.includes('nume') && l.includes('calitate'))) {
+          headerIdx = i
+          break
         }
       }
 
-      // Fallback: daca sectiunea nu a fost detectata, cauta pattern-uri de nume
-      if (result.length === 0) {
-        const partePatterns = [
-          /reclamant[:\s]+([A-ZĂÎȘȚÂ][A-ZĂÎȘTÂa-zăîșță\s\-\.]+)/gi,
-          /parat[:\s]+([A-ZĂÎȘȚÂ][A-ZĂÎȘTÂa-zăîșță\s\-\.]+)/gi,
-          /intervenient[:\s]+([A-ZĂÎȘȚÂ][A-ZĂÎȘTÂa-zăîșță\s\-\.]+)/gi,
-          /petent[:\s]+([A-ZĂÎȘȚÂ][A-ZĂÎȘTÂa-zăîșță\s\-\.]+)/gi,
-          /intimat[:\s]+([A-ZĂÎȘȚÂ][A-ZĂÎȘTÂa-zăîșță\s\-\.]+)/gi,
-        ]
+      if (headerIdx === -1) return []
 
-        for (const pattern of partePatterns) {
-          const matches = [...text.matchAll(pattern)]
-          for (const m of matches) {
-            const name = m[1].trim().replace(/\s+/g, ' ')
-            if (name.length >= 3 && name.length <= 80 && !result.includes(name)) {
-              result.push(name)
-            }
-          }
+      // Extrage randurile dupa header pana la urmatoarea sectiune
+      for (let i = headerIdx + 1; i < lines.length; i++) {
+        const line = lines[i]
+        const lower = line.toLowerCase()
+
+        // Opreste la urmatoarea sectiune (Sedinte, Cai atac, etc.)
+        if (
+          lower.includes('şedin') || lower.includes('sedin') ||
+          lower.includes('căi atac') || lower.includes('cai atac') ||
+          lower.includes('citare') || lower.includes('nu exist')
+        ) break
+
+        // Extrage numele — "Călin Costel    Petent" → "Călin Costel"
+        const name = line.split(/\s{2,}|\t/)[0].trim()
+        if (name.length >= 2 && name.length <= 80 && !/^\d+$/.test(name) && !result.includes(name)) {
+          result.push(name)
         }
       }
 
