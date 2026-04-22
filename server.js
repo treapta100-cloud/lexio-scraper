@@ -177,31 +177,37 @@ async function scrapeParti(page, numarDosar, selResults) {
       const result = []
       let inPartiSection = false
 
+      // Normalizeaza diacritice pentru comparatie
+      function norm(s) {
+        return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim()
+      }
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        const lower = line.toLowerCase()
+        const n = norm(line)
 
-        // Detecteaza inceputul sectiunii Parti
-        if (lower === 'parti' || lower === 'părți' || lower === 'parti in dosar' || lower === 'parti dosar') {
+        // Detecteaza inceputul sectiunii Parti (cu sau fara diacritice)
+        if (n === 'parti' || n === 'partile' || n === 'parti in dosar') {
           inPartiSection = true
           continue
         }
 
         if (inPartiSection) {
+          // Sari linia de header tabel
+          if (n.includes('calitate') || n === 'nume') continue
+
           // Opreste la urmatoarea sectiune
           if (
-            lower.includes('termen') || lower.includes('sedinte') ||
-            lower.includes('dosar') || lower.includes('document') ||
-            lower.includes('cale de atac') || lower.includes('informatii')
+            n.includes('sedint') || n.includes('seding') ||
+            n.includes('cai atac') || n.includes('caile de atac') ||
+            n.includes('citare') || n.includes('informatii')
           ) break
 
-          // Extrage numele partii — linie cu litere mari, fara cifre multe
-          // Format tipic: "POPESCU ION" sau "POPESCU ION - Reclamant" sau "SC FIRMA SRL"
-          const name = line.split(' - ')[0].split('\t')[0].trim()
+          // Extrage numele — format "Agachi Adi    Condamnat" → ia ce e inainte de 2+ spatii
+          const name = line.split(/\s{2,}|\t/)[0].trim()
           if (
             name.length >= 3 &&
             name.length <= 80 &&
-            /[A-ZĂÎȘȚÂ]/.test(name) &&
             !/^\d+$/.test(name) &&
             !result.includes(name)
           ) {
