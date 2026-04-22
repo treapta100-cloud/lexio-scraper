@@ -99,35 +99,52 @@ async function scrapeDosar(numarDosar) {
 
 async function scrapeParti(page, numarDosar, selResults) {
   try {
-    console.log('[scraper] Caut link dosar pentru parti...')
+    console.log('[scraper] Caut element dosar in pagina...')
 
-    // Incearca sa dea click pe randul dosarului sau pe primul link din rezultate
-    const clicked = await page.evaluate((numar, sel) => {
-      const container = document.querySelector(sel)
-      if (!container) return 'no-container'
+    // Log structura paginii pentru debug
+    const debug = await page.evaluate((numar) => {
+      const all = Array.from(document.querySelectorAll('a, tr, td, [onclick]'))
+      const withDosar = all.filter(el => el.textContent?.includes(numar)).slice(0, 5)
+      return {
+        totalElements: all.length,
+        withDosar: withDosar.map(el => ({
+          tag: el.tagName,
+          onclick: el.getAttribute('onclick')?.slice(0, 80) ?? null,
+          text: el.textContent?.trim().slice(0, 60),
+          id: el.id || null,
+        })),
+        allLinks: Array.from(document.querySelectorAll('a')).length,
+      }
+    }, numarDosar)
+    console.log('[scraper] Debug pagina:', JSON.stringify(debug))
 
-      // Cauta link care contine numarul dosarului
-      const allLinks = Array.from(container.querySelectorAll('a'))
-      let target = allLinks.find(a => a.textContent.trim().includes(numar))
-      if (!target && allLinks.length > 0) target = allLinks[0]
+    // Incearca sa dea click pe elementul care contine numarul dosarului
+    const clicked = await page.evaluate((numar) => {
+      // Cauta orice element care contine exact numarul dosarului
+      const candidates = Array.from(document.querySelectorAll('a, td, tr, span, div'))
+        .filter(el => el.textContent?.trim().includes(numar))
 
+      if (candidates.length === 0) return 'no-element'
+
+      // Prefera link-uri sau elemente cu onclick
+      let target = candidates.find(el => el.tagName === 'A' || el.getAttribute('onclick'))
       if (!target) {
-        // Incearca click pe primul rand din tabel
-        const rows = container.querySelectorAll('tr')
-        for (const row of rows) {
-          if (row.textContent.includes(numar)) {
-            const link = row.querySelector('a')
-            if (link) { link.click(); return 'row-link' }
-            row.click()
-            return 'row-click'
-          }
+        // Ia primul TD care contine numarul si incearca sa-i gaseasca parintele TR
+        const td = candidates.find(el => el.tagName === 'TD')
+        if (td) {
+          const tr = td.closest('tr')
+          const link = tr?.querySelector('a')
+          if (link) { link.click(); return 'tr-link' }
+          if (tr) { tr.click(); return 'tr-click' }
+          td.click(); return 'td-click'
         }
-        return 'no-link'
+        // Fallback: primul element gasit
+        target = candidates[0]
       }
 
       target.click()
-      return 'link-click'
-    }, numarDosar, selResults)
+      return `click-${target.tagName}`
+    }, numarDosar)
 
     console.log(`[scraper] Click rezultat: ${clicked}`)
     if (clicked === 'no-container' || clicked === 'no-link') return []
