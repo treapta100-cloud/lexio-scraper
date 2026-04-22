@@ -149,17 +149,25 @@ async function scrapeParti(page, numarDosar, selResults) {
     console.log(`[scraper] Click rezultat: ${clicked}`)
     if (clicked === 'no-element') return []
 
-    // Asteapta sa se incarce continutul (fie navigare, fie expand in pagina)
-    await Promise.race([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }),
-      new Promise(r => setTimeout(r, 5000)),
-    ])
+    // Asteapta navigarea — poate fi lenta pe SharePoint
+    try {
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 12000 })
+    } catch (_) {
+      // Daca nu e navigare, e posibil expand in pagina — asteptam oricum
+    }
+    await new Promise(r => setTimeout(r, 3000))
 
-    await new Promise(r => setTimeout(r, 2000))
-
-    // Log textul paginii de detaliu pentru debug
-    const pageText = await page.evaluate(() => document.body?.innerText ?? '')
-    console.log('[scraper] Pagina detaliu (primele 800 chars):', pageText.slice(0, 800).replace(/\n+/g, ' | '))
+    // Log URL curent + textul paginii de detaliu
+    const currentUrl = page.url()
+    console.log('[scraper] URL dupa click:', currentUrl)
+    let pageText = ''
+    try {
+      pageText = await page.evaluate(() => document.body?.innerText ?? '')
+      console.log('[scraper] Pagina detaliu (primele 1000 chars):', pageText.slice(0, 1000).replace(/\n+/g, ' | '))
+    } catch (e) {
+      console.log('[scraper] Eroare evaluate dupa click:', e.message)
+      return []
+    }
 
     // Extrage partile din pagina de detaliu
     const parti = await page.evaluate(() => {
