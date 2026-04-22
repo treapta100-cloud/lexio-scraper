@@ -219,6 +219,32 @@ async function scrapeParti(page, numarDosar, selResults) {
   }
 }
 
+async function scrapeTermeneOnPage(page, numarDosar) {
+  console.log(`[batch] Caut termene pentru: ${numarDosar}`)
+
+  await page.goto(PORTAL_URL, { waitUntil: 'networkidle2', timeout: 30000 })
+  await page.waitForSelector(SEL_INPUT, { timeout: 10000 })
+  await page.click(SEL_INPUT, { clickCount: 3 })
+  await page.type(SEL_INPUT, numarDosar, { delay: 40 })
+
+  await page.waitForSelector(SEL_BTN, { timeout: 5000 })
+  await Promise.all([
+    page.click(SEL_BTN),
+    page.waitForResponse(r => r.url().includes('dosare.aspx'), { timeout: 15000 }),
+  ])
+  await new Promise(r => setTimeout(r, 2500))
+
+  const termene = await page.evaluate(() => {
+    const text = document.body?.innerText ?? ''
+    return [...text.matchAll(/(\d{2}[.]\d{2}[.]\d{4})/g)]
+      .map(m => m[1])
+      .filter((v, i, a) => a.indexOf(v) === i)
+  })
+
+  console.log(`[batch] ${numarDosar} → ${termene.length} date: ${termene.join(', ')}`)
+  return termene
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
@@ -238,6 +264,50 @@ app.post('/cauta-dosar', async (req, res) => {
   }
 })
 
+
+app.post('/sync-batch', async (req, res) => {
+  const dosare = req.body?.dosare
+  if (!Array.isArray(dosare) || dosare.length === 0) {
+    return res.json({ rezultate: [] })
+  }
+
+  console.log(`[batch] Start sync pentru ${dosare.length} dosare`)
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--ignore-certificate-errors',
+    ],
+    headless: true,
+  })
+
+  const rezultate = []
+
+  try {
+    const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+    await page.setViewport({ width: 1280, height: 800 })
+
+    for (const numar of dosare) {
+      try {
+        const termene = await scrapeTermeneOnPage(page, numar.trim())
+        rezultate.push({ numar_dosar: numar, termene_urmatoare: termene })
+      } catch (e) {
+        console.log(`[batch] Eroare la ${numar}: ${e.message}`)
+        rezultate.push({ numar_dosar: numar, termene_urmatoare: [] })
+      }
+    }
+  } finally {
+    await browser.close()
+  }
+
+  console.log(`[batch] Gata. ${rezultate.length} dosare procesate.`)
+  res.json({ rezultate })
+})
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
