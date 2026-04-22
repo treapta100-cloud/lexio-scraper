@@ -1,5 +1,6 @@
 const express = require('express')
 const puppeteer = require('puppeteer-core')
+const http = require('http')
 
 const app = express()
 app.use(express.json())
@@ -264,6 +265,102 @@ app.post('/cauta-dosar', async (req, res) => {
   }
 })
 
+
+// ─── SOAP helpers ─────────────────────────────────────────────────────────────
+
+function soapRequest(numarDosar) {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <CautareDosare xmlns="portalquery.just.ro">
+      <numarDosar>${numarDosar}</numarDosar>
+      <obiectDosar></obiectDosar>
+      <numeParte></numeParte>
+      <institutie xsi:nil="true" />
+    </CautareDosare>
+  </soap:Body>
+</soap:Envelope>`
+}
+
+function httpPost(body) {
+  return new Promise((resolve, reject) => {
+    const bodyBuf = Buffer.from(body, 'utf-8')
+    const req = http.request({
+      hostname: 'portalquery.just.ro',
+      path: '/query.asmx',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml; charset=utf-8',
+        'SOAPAction': '"portalquery.just.ro/CautareDosare"',
+        'Content-Length': bodyBuf.length,
+      },
+    }, res => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => resolve(data))
+    })
+    req.on('error', reject)
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(bodyBuf)
+    req.end()
+  })
+}
+
+function extractAll(xml, tag) {
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g')
+  const results = []
+  let m
+  while ((m = re.exec(xml)) !== null) results.push(m[1].trim())
+  return results
+}
+
+function extractOne(xml, tag) {
+  const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(xml)
+  return m ? m[1].trim() : null
+}
+
+async function soapGetDosar(numarDosar) {
+  const xml = await httpPost(soapRequest(numarDosar))
+
+  const sedinteBlocks = extractAll(xml, 'DosarSedinta')
+  const sedinte = sedinteBlocks.map(b => ({
+    data: extractOne(b, 'data'),
+    ora: extractOne(b, 'ora'),
+    complet: extractOne(b, 'complet'),
+    solutie: extractOne(b, 'solutie'),
+    documentSedinta: extractOne(b, 'documentSedinta'),
+  })).filter(s => s.data)
+
+  const partiBlocks = extractAll(xml, 'DosarParte')
+  const parti = partiBlocks.map(b => ({
+    nume: extractOne(b, 'nume'),
+    calitate: extractOne(b, 'calitateParte'),
+  })).filter(p => p.nume)
+
+  return { sedinte, parti }
+}
+
+app.post('/sync-soap', async (req, res) => {
+  const dosare = req.body?.dosare
+  if (!Array.isArray(dosare) || dosare.length === 0) return res.json({ rezultate: [] })
+
+  console.log(`[soap] Sync pentru ${dosare.length} dosare`)
+
+  const rezultate = await Promise.all(
+    dosare.map(async numar => {
+      try {
+        const { sedinte, parti } = await soapGetDosar(numar.trim())
+        console.log(`[soap] ${numar} → ${sedinte.length} sedinte, ${parti.length} parti`)
+        return { numar_dosar: numar, sedinte, parti }
+      } catch (e) {
+        console.log(`[soap] Eroare ${numar}: ${e.message}`)
+        return { numar_dosar: numar, sedinte: [], parti: [] }
+      }
+    })
+  )
+
+  res.json({ rezultate })
+})
 
 app.post('/sync-batch', async (req, res) => {
   const dosare = req.body?.dosare
