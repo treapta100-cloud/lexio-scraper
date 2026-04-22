@@ -147,7 +147,7 @@ async function scrapeParti(page, numarDosar, selResults) {
     }, numarDosar)
 
     console.log(`[scraper] Click rezultat: ${clicked}`)
-    if (clicked === 'no-container' || clicked === 'no-link') return []
+    if (clicked === 'no-element') return []
 
     // Asteapta sa se incarce continutul (fie navigare, fie expand in pagina)
     await Promise.race([
@@ -156,6 +156,10 @@ async function scrapeParti(page, numarDosar, selResults) {
     ])
 
     await new Promise(r => setTimeout(r, 2000))
+
+    // Log textul paginii de detaliu pentru debug
+    const pageText = await page.evaluate(() => document.body?.innerText ?? '')
+    console.log('[scraper] Pagina detaliu (primele 800 chars):', pageText.slice(0, 800).replace(/\n+/g, ' | '))
 
     // Extrage partile din pagina de detaliu
     const parti = await page.evaluate(() => {
