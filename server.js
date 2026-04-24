@@ -1,7 +1,6 @@
 const express = require('express')
 const puppeteer = require('puppeteer-core')
 const http = require('http')
-const Anthropic = require('@anthropic-ai/sdk')
 
 const app = express()
 app.use(express.json({ limit: '10mb' }))
@@ -450,37 +449,46 @@ app.post('/extract-from-image', async (req, res) => {
   const { image, mimeType } = req.body
   if (!image) return res.status(400).json({ rows: [], columns: [], error: 'No image provided' })
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(503).json({ rows: [], columns: [], error: 'ANTHROPIC_API_KEY not configured' })
+  if (!process.env.GROK_API_KEY) {
+    return res.status(503).json({ rows: [], columns: [], error: 'GROK_API_KEY not configured' })
   }
 
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-
-    const message = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4096,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: mimeType || 'image/jpeg',
-              data: image,
+    const grokResp = await fetch('https://api.x.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.GROK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'grok-2-vision-1212',
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: `data:${mimeType || 'image/jpeg'};base64,${image}` },
             },
-          },
-          {
-            type: 'text',
-            text: `Aceasta imagine contine un tabel cu dosare juridice. Extrage toate randurile vizibile din tabel ca JSON array. Returneaza DOAR JSON pur, fara niciun alt text sau explicatii. Format exact: [{"coloana1": "valoare1", "coloana2": "valoare2"}, ...]. Foloseste exact numele coloanelor din antetul tabelului ca keys. Daca nu gasesti un tabel cu date, returneaza [].`,
-          },
-        ],
-      }],
+            {
+              type: 'text',
+              text: `Aceasta imagine contine un tabel cu dosare juridice. Extrage toate randurile vizibile din tabel ca JSON array. Returneaza DOAR JSON pur, fara niciun alt text sau explicatii. Format exact: [{"coloana1": "valoare1", "coloana2": "valoare2"}, ...]. Foloseste exact numele coloanelor din antetul tabelului ca keys. Daca nu gasesti un tabel cu date, returneaza [].`,
+            },
+          ],
+        }],
+      }),
     })
 
-    const text = message.content[0]?.text?.trim() ?? ''
+    if (!grokResp.ok) {
+      const err = await grokResp.text()
+      console.log('[vision] Grok eroare HTTP:', grokResp.status, err.slice(0, 200))
+      return res.status(502).json({ rows: [], columns: [], error: 'Grok API error: ' + grokResp.status })
+    }
+
+    const grokData = await grokResp.json()
+    const text = grokData.choices?.[0]?.message?.content?.trim() ?? ''
     const jsonMatch = text.match(/\[[\s\S]*\]/)
+
     if (!jsonMatch) {
       console.log('[vision] Nu s-a gasit JSON in raspuns:', text.slice(0, 200))
       return res.json({ rows: [], columns: [] })
