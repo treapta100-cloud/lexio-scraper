@@ -5,6 +5,19 @@ const http = require('http')
 const app = express()
 app.use(express.json())
 
+const API_KEY = process.env.SCRAPER_API_KEY
+
+function requireApiKey(req, res, next) {
+  if (!API_KEY) return next()
+  const key = req.headers['x-api-key']
+  if (!key || key !== API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  next()
+}
+
+app.use(requireApiKey)
+
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
 const DOSAR_REGEX = /^\d{1,6}\/\d{1,4}\/\d{4}$/
 
