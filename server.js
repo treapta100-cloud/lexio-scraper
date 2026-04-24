@@ -1,9 +1,10 @@
 const express = require('express')
 const puppeteer = require('puppeteer-core')
 const http = require('http')
+const Anthropic = require('@anthropic-ai/sdk')
 
 const app = express()
-app.use(express.json())
+app.use(express.json({ limit: '10mb' }))
 
 const API_KEY = process.env.SCRAPER_API_KEY
 
@@ -441,6 +442,59 @@ app.post('/sync-batch', async (req, res) => {
 
   console.log(`[batch] Gata. ${rezultate.length} dosare procesate.`)
   res.json({ rezultate })
+})
+
+// ─── Claude Vision — Extrage tabel din fotografie ────────────────────────────
+
+app.post('/extract-from-image', async (req, res) => {
+  const { image, mimeType } = req.body
+  if (!image) return res.status(400).json({ rows: [], columns: [], error: 'No image provided' })
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ rows: [], columns: [], error: 'ANTHROPIC_API_KEY not configured' })
+  }
+
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: mimeType || 'image/jpeg',
+              data: image,
+            },
+          },
+          {
+            type: 'text',
+            text: `Aceasta imagine contine un tabel cu dosare juridice. Extrage toate randurile vizibile din tabel ca JSON array. Returneaza DOAR JSON pur, fara niciun alt text sau explicatii. Format exact: [{"coloana1": "valoare1", "coloana2": "valoare2"}, ...]. Foloseste exact numele coloanelor din antetul tabelului ca keys. Daca nu gasesti un tabel cu date, returneaza [].`,
+          },
+        ],
+      }],
+    })
+
+    const text = message.content[0]?.text?.trim() ?? ''
+    const jsonMatch = text.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) {
+      console.log('[vision] Nu s-a gasit JSON in raspuns:', text.slice(0, 200))
+      return res.json({ rows: [], columns: [] })
+    }
+
+    const rows = JSON.parse(jsonMatch[0])
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : []
+
+    console.log(`[vision] Extras ${rows.length} randuri, ${columns.length} coloane`)
+    res.json({ rows, columns })
+  } catch (e) {
+    console.log('[vision] Eroare:', e.message)
+    res.status(500).json({ rows: [], columns: [], error: e.message })
+  }
 })
 
 const PORT = process.env.PORT || 3000
