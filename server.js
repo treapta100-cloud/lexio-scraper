@@ -5,6 +5,25 @@ const http = require('http')
 const app = express()
 app.use(express.json())
 
+// Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
+const DOSAR_REGEX = /^\d{1,6}\/\d{1,4}\/\d{4}$/
+
+function sanitizeNumarDosar(input) {
+  if (typeof input !== 'string') return null
+  const trimmed = input.trim()
+  if (!DOSAR_REGEX.test(trimmed)) return null
+  return trimmed
+}
+
+function escapeXml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
 const PORTAL_URL = 'https://portal.just.ro/SitePages/dosare.aspx'
 
 const SEL_INPUT   = '#ctl00_PlaceHolderMain_g_3c48c3b5_52ec_496d_ac28_a489959dea03_SPTextSlicerValueTextControl'
@@ -251,9 +270,9 @@ async function scrapeTermeneOnPage(page, numarDosar) {
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
 
 app.post('/cauta-dosar', async (req, res) => {
-  const numar_dosar = req.body?.numar_dosar?.trim()
-  if (!numar_dosar || numar_dosar.length < 3) {
-    return res.json({ rezultate: [], error: 'Lipseste numar_dosar' })
+  const numar_dosar = sanitizeNumarDosar(req.body?.numar_dosar)
+  if (!numar_dosar) {
+    return res.json({ rezultate: [], error: 'Numar dosar invalid. Format asteptat: NNNNN/NNN/YYYY' })
   }
 
   try {
@@ -273,7 +292,7 @@ function soapRequest(numarDosar) {
 <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
     <CautareDosare xmlns="portalquery.just.ro">
-      <numarDosar>${numarDosar}</numarDosar>
+      <numarDosar>${escapeXml(numarDosar)}</numarDosar>
       <obiectDosar></obiectDosar>
       <numeParte></numeParte>
       <institutie xsi:nil="true" />
@@ -348,13 +367,18 @@ app.post('/sync-soap', async (req, res) => {
 
   const rezultate = await Promise.all(
     dosare.map(async numar => {
+      const numarCurat = sanitizeNumarDosar(numar)
+      if (!numarCurat) {
+        console.log(`[soap] Numar invalid ignorat: ${numar}`)
+        return { numar_dosar: numar, sedinte: [], parti: [], error: 'Format invalid' }
+      }
       try {
-        const { sedinte, parti } = await soapGetDosar(numar.trim())
-        console.log(`[soap] ${numar} → ${sedinte.length} sedinte, ${parti.length} parti`)
-        return { numar_dosar: numar, sedinte, parti }
+        const { sedinte, parti } = await soapGetDosar(numarCurat)
+        console.log(`[soap] ${numarCurat} → ${sedinte.length} sedinte, ${parti.length} parti`)
+        return { numar_dosar: numarCurat, sedinte, parti }
       } catch (e) {
-        console.log(`[soap] Eroare ${numar}: ${e.message}`)
-        return { numar_dosar: numar, sedinte: [], parti: [] }
+        console.log(`[soap] Eroare ${numarCurat}: ${e.message}`)
+        return { numar_dosar: numarCurat, sedinte: [], parti: [] }
       }
     })
   )
