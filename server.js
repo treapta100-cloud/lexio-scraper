@@ -518,13 +518,23 @@ app.get('/search-firma', async (req, res) => {
     const rezultate = []
     const qUpper = q.toUpperCase()
 
+    function normalizeaza(n) {
+      return n.toUpperCase()
+        .replace(/[.\-,]/g, '')
+        .replace(/\b(SC|RA|SRL|SA|SNC|SCS|SNP|SN|SA|RI|SCA)\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+    }
+
     for (const b of partiBlocks) {
       const nume = extractOne(b, 'nume')
-      if (!nume || vazute.has(nume)) continue
+      if (!nume) continue
       if (!nume.toUpperCase().includes(qUpper)) continue
-      vazute.add(nume)
+      const cheie = normalizeaza(nume)
+      if (vazute.has(cheie)) continue
+      vazute.add(cheie)
       rezultate.push({ denumire: nume, cui: null, judet: null, localitate: null })
-      if (rezultate.length >= 8) break
+      if (rezultate.length >= 6) break
     }
 
     console.log(`[search-firma] "${q}" → ${rezultate.length} sugestii din portal.just.ro`)
