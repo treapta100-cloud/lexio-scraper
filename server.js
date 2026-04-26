@@ -744,6 +744,9 @@ const CATEGORII_RELEVANTE = [
   'drept civil', 'drept penal', 'drept procesual civil', 'drept procesual penal',
   'dreptul muncii', 'drept comercial', 'insolven', 'drept fiscal',
   'drept constitu', 'drept administrativ', 'dreptul familiei',
+  'avocat', 'barou', 'jurispruden', 'iccj', 'ccr', 'curtea constitu',
+  'executare silit', 'dreptul securit', 'legisla', 'dreptul uniunii',
+  'drept imobiliar', 'dreptul propriet', 'raspundere', 'contencios',
 ]
 
 function esteRelevant(categorii) {
