@@ -629,15 +629,14 @@ async function getOpenapiData(cui) {
   const json = await resp.json()
   if (json?.error) return null
   return {
-    capital_social: json?.capital_social || null,
     nr_onrc: json?.numar_reg_com || null,
-    judet: json?.judet || null,
     adresa: json?.adresa || null,
+    capital_social: json?.capital_social || null,
     stare: json?.stare || null,
     radiata: json?.radiata ?? false,
-    tva_data: json?.tva || null,
-    tva_la_incasare: Array.isArray(json?.tva_la_incasare) && json.tva_la_incasare.length > 0,
-    telefon: json?.telefon || null,
+    ultima_declaratie: json?.ultima_declaratie || null,
+    impozit_micro: json?.impozit_micro || null,
+    impozit_profit: json?.impozit_profit || null,
   }
 }
 
