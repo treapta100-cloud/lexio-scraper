@@ -505,5 +505,132 @@ app.post('/extract-from-image', async (req, res) => {
   }
 })
 
+// ─── Due Diligence ───────────────────────────────────────────────────────────
+
+function soapRequestNumeParte(numeParte) {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <CautareDosare xmlns="portalquery.just.ro">
+      <numarDosar></numarDosar>
+      <obiectDosar></obiectDosar>
+      <numeParte>${escapeXml(numeParte)}</numeParte>
+      <institutie xsi:nil="true" />
+    </CautareDosare>
+  </soap:Body>
+</soap:Envelope>`
+}
+
+async function getAnafData(cui) {
+  const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
+  const today = new Date().toISOString().split('T')[0]
+  const body = JSON.stringify([{ cui: parseInt(cuiCurat), data: today }])
+  const resp = await fetch('https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!resp.ok) throw new Error(`ANAF HTTP ${resp.status}`)
+  const json = await resp.json()
+  const firma = json?.found?.[0]
+  if (!firma) return null
+  return {
+    denumire: firma.denumire || null,
+    cui: firma.cui || cuiCurat,
+    adresa: firma.adresa || null,
+    cod_caen: firma.cod_caen || null,
+    stare: firma.stare || null,
+    data_inregistrare: firma.data_inregistrare || null,
+    platitor_tva: firma.scpTVA === true,
+    tva_la_incasare: firma.scpTVAincasare === true,
+    inactiv: firma.statusInactivi === true,
+    e_factura: firma.statusEFactura === true,
+  }
+}
+
+async function getOpenapiData(cui) {
+  const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
+  const resp = await fetch(`https://openapi.ro/api/companies/${cuiCurat}`, {
+    headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!resp.ok) return null
+  const json = await resp.json()
+  return {
+    capital_social: json?.capital_social || null,
+    nr_onrc: json?.numar_ordine_rc || null,
+    judet: json?.judet || null,
+    forma_juridica: json?.forma_juridica || null,
+    data_inregistrare: json?.data_infiintare || null,
+  }
+}
+
+async function getDosarePortal(numeParte) {
+  const xml = await httpPost(soapRequestNumeParte(numeParte))
+  const dosareBlocks = extractAll(xml, 'Dosar')
+  return dosareBlocks.map(b => {
+    const sedinteBlocks = extractAll(b, 'DosarSedinta')
+    const sedinteFiltrate = sedinteBlocks
+      .map(s => ({
+        data: extractOne(s, 'data'),
+        ora: extractOne(s, 'ora'),
+        solutie: extractOne(s, 'solutie'),
+      }))
+      .filter(s => s.data && new Date(s.data) >= new Date())
+
+    const partiBlocks = extractAll(b, 'DosarParte')
+    const parti = partiBlocks.map(p => ({
+      nume: extractOne(p, 'nume'),
+      calitate: extractOne(p, 'calitateParte'),
+    })).filter(p => p.nume)
+
+    return {
+      numar: extractOne(b, 'numar'),
+      instanta: extractOne(b, 'institutie'),
+      obiect: extractOne(b, 'obiect'),
+      stadiu: extractOne(b, 'stadiuProcesual'),
+      parti,
+      termene_viitoare: sedinteFiltrate,
+    }
+  }).filter(d => d.numar)
+}
+
+app.post('/due-diligence', async (req, res) => {
+  const { cui, denumire } = req.body || {}
+  if (!cui && !denumire) {
+    return res.status(400).json({ error: 'Furnizeaza CUI sau denumire firma' })
+  }
+
+  console.log(`[due-diligence] Verificare: CUI=${cui} / denumire=${denumire}`)
+
+  const [anafResult, openapiResult, dosareResult] = await Promise.allSettled([
+    cui ? getAnafData(cui) : Promise.resolve(null),
+    cui ? getOpenapiData(cui) : Promise.resolve(null),
+    getDosarePortal(denumire || (anafResult?.value?.denumire ?? '')),
+  ])
+
+  const anaf = anafResult.status === 'fulfilled' ? anafResult.value : null
+  const openapi = openapiResult.status === 'fulfilled' ? openapiResult.value : null
+  const dosare = dosareResult.status === 'fulfilled' ? dosareResult.value : []
+
+  const numePentruPortal = denumire || anaf?.denumire
+  let dosarePortal = dosare
+  if (!dosarePortal.length && numePentruPortal) {
+    try { dosarePortal = await getDosarePortal(numePentruPortal) } catch (_) {}
+  }
+
+  res.json({
+    anaf,
+    openapi,
+    dosare_portal: dosarePortal,
+    surse: {
+      anaf: anafResult.status === 'fulfilled',
+      openapi: openapiResult.status === 'fulfilled',
+      portal: dosareResult.status === 'fulfilled',
+    },
+  })
+})
+
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
