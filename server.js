@@ -721,5 +721,66 @@ app.post('/due-diligence', async (req, res) => {
   })
 })
 
+// ─── Stiri juridice (juridice.ro RSS) ────────────────────────────────────────
+
+let stiriCache = { data: null, ts: 0 }
+const STIRI_TTL = 30 * 60 * 1000
+
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&#8211;/g, '–').replace(/&#8212;/g, '—')
+    .replace(/&#8230;/g, '…').replace(/&#8216;/g, '‘')
+    .replace(/&#8217;/g, '’').replace(/&#8220;/g, '“')
+    .replace(/&#8221;/g, '”').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#\d+;/g, '')
+}
+
+function stripCdata(str) {
+  return str.replace(/<!\[CDATA\[|\]\]>/g, '').trim()
+}
+
+async function fetchStiriJuridice() {
+  const now = Date.now()
+  if (stiriCache.data && now - stiriCache.ts < STIRI_TTL) return stiriCache.data
+
+  const resp = await fetch('https://www.juridice.ro/feed', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LexioApp/1.0)' },
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!resp.ok) throw new Error(`juridice.ro HTTP ${resp.status}`)
+  const xml = await resp.text()
+
+  const EXCLUDE_DOMAINS = ['cariere.juridice.ro', 'citate.juridice.ro']
+
+  const items = extractAll(xml, 'item')
+    .map(item => {
+      const link = (extractOne(item, 'link') || '').trim()
+      if (EXCLUDE_DOMAINS.some(d => link.includes(d))) return null
+
+      const rawTitle = stripCdata(extractOne(item, 'title') || '')
+      const title = decodeHtmlEntities(rawTitle)
+      const pubDate = (extractOne(item, 'pubDate') || '').trim()
+      const cats = extractAll(item, 'category').map(c => stripCdata(c))
+
+      return { title, link, pubDate, categorii: cats.slice(0, 2) }
+    })
+    .filter(Boolean)
+    .slice(0, 8)
+
+  stiriCache = { data: items, ts: now }
+  return items
+}
+
+app.get('/stiri-juridice', async (req, res) => {
+  try {
+    const stiri = await fetchStiriJuridice()
+    res.json({ stiri })
+  } catch (e) {
+    console.log('[stiri-juridice] Eroare:', e.message)
+    res.status(502).json({ stiri: [], error: e.message })
+  }
+})
+
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
