@@ -512,22 +512,20 @@ app.get('/search-firma', async (req, res) => {
   if (q.length < 3) return res.json({ rezultate: [] })
 
   try {
-    const resp = await fetch(
-      `https://openapi.ro/api/companies?name=${encodeURIComponent(q)}&limit=7`,
-      {
-        headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
-        signal: AbortSignal.timeout(6000),
-      }
-    )
-    if (!resp.ok) return res.json({ rezultate: [] })
-    const json = await resp.json()
-    const lista = Array.isArray(json) ? json : (json?.data ?? json?.companies ?? [])
-    const rezultate = lista.slice(0, 7).map(f => ({
-      denumire: f.denumire || f.name || f.company_name || null,
-      cui: f.cif || f.cui || f.vat_number || null,
-      judet: f.judet || f.county || null,
-      localitate: f.localitate || f.city || null,
-    })).filter(f => f.denumire && f.cui)
+    const xml = await httpPost(soapRequestNumeParte(q))
+    const partiBlocks = extractAll(xml, 'DosarParte')
+    const vazute = new Set()
+    const rezultate = []
+
+    for (const b of partiBlocks) {
+      const nume = extractOne(b, 'nume')
+      if (!nume || vazute.has(nume)) continue
+      vazute.add(nume)
+      rezultate.push({ denumire: nume, cui: null, judet: null, localitate: null })
+      if (rezultate.length >= 8) break
+    }
+
+    console.log(`[search-firma] "${q}" → ${rezultate.length} sugestii din portal.just.ro`)
     res.json({ rezultate })
   } catch (e) {
     console.log('[search-firma] Eroare:', e.message)
@@ -580,19 +578,25 @@ async function getAnafData(cui) {
 }
 
 async function getOpenapiData(cui) {
+  if (!cui) return null
   const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
-  const resp = await fetch(`https://openapi.ro/api/companies/${cuiCurat}`, {
+  const resp = await fetch(`https://api.openapi.ro/api/companies/${cuiCurat}`, {
     headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
     signal: AbortSignal.timeout(8000),
   })
   if (!resp.ok) return null
   const json = await resp.json()
+  if (json?.error) return null
   return {
     capital_social: json?.capital_social || null,
-    nr_onrc: json?.numar_ordine_rc || null,
+    nr_onrc: json?.numar_reg_com || null,
     judet: json?.judet || null,
-    forma_juridica: json?.forma_juridica || null,
-    data_inregistrare: json?.data_infiintare || null,
+    adresa: json?.adresa || null,
+    stare: json?.stare || null,
+    radiata: json?.radiata ?? false,
+    tva_data: json?.tva || null,
+    tva_la_incasare: Array.isArray(json?.tva_la_incasare) && json.tva_la_incasare.length > 0,
+    telefon: json?.telefon || null,
   }
 }
 
