@@ -339,7 +339,7 @@ function httpPost(body) {
 }
 
 function extractAll(xml, tag) {
-  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g')
+  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g')
   const results = []
   let m
   while ((m = re.exec(xml)) !== null) results.push(m[1].trim())
@@ -347,7 +347,7 @@ function extractAll(xml, tag) {
 }
 
 function extractOne(xml, tag) {
-  const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(xml)
+  const m = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`).exec(xml)
   return m ? m[1].trim() : null
 }
 
@@ -643,31 +643,42 @@ async function getOpenapiData(cui) {
 async function getDosarePortal(numeParte) {
   const xml = await httpPost(soapRequestNumeParte(numeParte))
   const dosareBlocks = extractAll(xml, 'Dosar')
-  return dosareBlocks.map(b => {
-    const sedinteBlocks = extractAll(b, 'DosarSedinta')
-    const sedinteFiltrate = sedinteBlocks
-      .map(s => ({
-        data: extractOne(s, 'data'),
-        ora: extractOne(s, 'ora'),
-        solutie: extractOne(s, 'solutie'),
-      }))
-      .filter(s => s.data && new Date(s.data) >= new Date())
+  const qUpper = numeParte.toUpperCase()
+  const acum = new Date()
+  const rezultate = []
+
+  for (const b of dosareBlocks) {
+    const numar = extractOne(b, 'numar')
+    if (!numar) continue
 
     const partiBlocks = extractAll(b, 'DosarParte')
-    const parti = partiBlocks.map(p => ({
-      nume: extractOne(p, 'nume'),
-      calitate: extractOne(p, 'calitateParte'),
-    })).filter(p => p.nume)
+    const parteGasita = partiBlocks.find(p => {
+      const n = extractOne(p, 'nume') || ''
+      return n.toUpperCase().includes(qUpper)
+    })
+    if (!parteGasita) continue
 
-    return {
-      numar: extractOne(b, 'numar'),
+    const calitate = extractOne(parteGasita, 'calitateParte') || null
+
+    const sedinteBlocks = extractAll(b, 'DosarSedinta')
+    const viitoare = sedinteBlocks
+      .map(s => ({ data: extractOne(s, 'data'), ora: extractOne(s, 'ora') }))
+      .filter(s => s.data && new Date(s.data) >= acum)
+      .sort((a, b) => new Date(a.data) - new Date(b.data))
+
+    rezultate.push({
+      numar,
       instanta: extractOne(b, 'institutie'),
       obiect: extractOne(b, 'obiect'),
       stadiu: extractOne(b, 'stadiuProcesual'),
-      parti,
-      termene_viitoare: sedinteFiltrate,
-    }
-  }).filter(d => d.numar)
+      calitate_firma: calitate,
+      urmator_termen: viitoare[0] || null,
+    })
+
+    if (rezultate.length >= 20) break
+  }
+
+  return rezultate
 }
 
 app.post('/due-diligence', async (req, res) => {
