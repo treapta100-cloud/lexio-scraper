@@ -587,7 +587,7 @@ async function getAnafData(cui) {
   const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
   const today = new Date().toISOString().split('T')[0]
   const body = JSON.stringify([{ cui: parseInt(cuiCurat), data: today }])
-  const resp = await fetch('https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva', {
+  const resp = await fetch('https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body,
@@ -597,17 +597,24 @@ async function getAnafData(cui) {
   const json = await resp.json()
   const firma = json?.found?.[0]
   if (!firma) return null
+  const dg = firma.date_generale || {}
+  const tva = firma.inregistrare_scop_Tva || {}
+  const rtvai = firma.inregistrare_RTVAI || {}
+  const inactivi = firma.inregistrare_inactivi || {}
   return {
-    denumire: firma.denumire || null,
-    cui: firma.cui || cuiCurat,
-    adresa: firma.adresa || null,
-    cod_caen: firma.cod_caen || null,
-    stare: firma.stare || null,
-    data_inregistrare: firma.data_inregistrare || null,
-    platitor_tva: firma.scpTVA === true,
-    tva_la_incasare: firma.scpTVAincasare === true,
-    inactiv: firma.statusInactivi === true,
-    e_factura: firma.statusEFactura === true,
+    denumire: dg.denumire || null,
+    cui: dg.cui || cuiCurat,
+    adresa: dg.adresa || null,
+    telefon: dg.telefon || null,
+    cod_caen: dg.cod_CAEN || null,
+    forma_juridica: dg.forma_juridica || null,
+    stare: dg.stare_inregistrare || null,
+    data_inregistrare: dg.data_inregistrare || null,
+    nr_reg_com: dg.nrRegCom || null,
+    platitor_tva: tva.scpTVA === true,
+    tva_la_incasare: rtvai.statusTvaIncasare === true,
+    inactiv: inactivi.statusInactivi === true,
+    e_factura: dg.statusRO_e_Factura === true,
   }
 }
 
