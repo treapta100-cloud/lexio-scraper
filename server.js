@@ -604,29 +604,29 @@ app.post('/due-diligence', async (req, res) => {
 
   console.log(`[due-diligence] Verificare: CUI=${cui} / denumire=${denumire}`)
 
-  const [anafResult, openapiResult, dosareResult] = await Promise.allSettled([
-    cui ? getAnafData(cui) : Promise.resolve(null),
-    cui ? getOpenapiData(cui) : Promise.resolve(null),
-    getDosarePortal(denumire || (anafResult?.value?.denumire ?? '')),
-  ])
-
-  const anaf = anafResult.status === 'fulfilled' ? anafResult.value : null
-  const openapi = openapiResult.status === 'fulfilled' ? openapiResult.value : null
-  const dosare = dosareResult.status === 'fulfilled' ? dosareResult.value : []
-
-  const numePentruPortal = denumire || anaf?.denumire
-  let dosarePortal = dosare
-  if (!dosarePortal.length && numePentruPortal) {
-    try { dosarePortal = await getDosarePortal(numePentruPortal) } catch (_) {}
+  // Pas 1 — ANAF primul (avem nevoie de denumire pentru portal)
+  let anaf = null
+  let anafOk = false
+  if (cui) {
+    try { anaf = await getAnafData(cui); anafOk = true } catch (_) {}
   }
+
+  // Pas 2 — portal + openapi in paralel, folosind denumirea din ANAF daca nu e furnizata
+  const numePentruPortal = denumire || anaf?.denumire || ''
+  console.log(`[due-diligence] Cautare portal cu: "${numePentruPortal}"`)
+
+  const [openapiResult, dosareResult] = await Promise.allSettled([
+    cui ? getOpenapiData(cui) : Promise.resolve(null),
+    numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve([]),
+  ])
 
   res.json({
     anaf,
-    openapi,
-    dosare_portal: dosarePortal,
+    openapi: openapiResult.status === 'fulfilled' ? openapiResult.value : null,
+    dosare_portal: dosareResult.status === 'fulfilled' ? dosareResult.value : [],
     surse: {
-      anaf: anafResult.status === 'fulfilled',
-      openapi: openapiResult.status === 'fulfilled',
+      anaf: anafOk,
+      openapi: openapiResult.status === 'fulfilled' && openapiResult.value !== null,
       portal: dosareResult.status === 'fulfilled',
     },
   })
