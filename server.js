@@ -516,10 +516,12 @@ app.get('/search-firma', async (req, res) => {
     const partiBlocks = extractAll(xml, 'DosarParte')
     const vazute = new Set()
     const rezultate = []
+    const qUpper = q.toUpperCase()
 
     for (const b of partiBlocks) {
       const nume = extractOne(b, 'nume')
       if (!nume || vazute.has(nume)) continue
+      if (!nume.toUpperCase().includes(qUpper)) continue
       vazute.add(nume)
       rezultate.push({ denumire: nume, cui: null, judet: null, localitate: null })
       if (rezultate.length >= 8) break
