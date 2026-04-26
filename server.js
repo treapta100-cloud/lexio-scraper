@@ -600,7 +600,8 @@ async function getAnafData(cui) {
   const dg = firma.date_generale || {}
   const tva = firma.inregistrare_scop_Tva || {}
   const rtvai = firma.inregistrare_RTVAI || {}
-  const inactivi = firma.inregistrare_inactivi || {}
+  const inactivi = firma.stare_inactiv || {}
+  const splitTva = firma.inregistrare_SplitTVA || {}
   return {
     denumire: dg.denumire || null,
     cui: dg.cui || cuiCurat,
@@ -614,6 +615,9 @@ async function getAnafData(cui) {
     platitor_tva: tva.scpTVA === true,
     tva_la_incasare: rtvai.statusTvaIncasare === true,
     inactiv: inactivi.statusInactivi === true,
+    data_inactivare: inactivi.dataInactivare || null,
+    data_reactivare: inactivi.dataReactivare || null,
+    split_tva: splitTva.statusSplitTVA === true,
     e_factura: dg.statusRO_e_Factura === true,
   }
 }
