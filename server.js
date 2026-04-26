@@ -740,6 +740,17 @@ function stripCdata(str) {
   return str.replace(/<!\[CDATA\[|\]\]>/g, '').trim()
 }
 
+const CATEGORII_RELEVANTE = [
+  'drept civil', 'drept penal', 'drept procesual civil', 'drept procesual penal',
+  'dreptul muncii', 'drept comercial', 'insolven', 'drept fiscal',
+  'drept constitu', 'drept administrativ', 'dreptul familiei',
+]
+
+function esteRelevant(categorii) {
+  const joined = categorii.join(' ').toLowerCase()
+  return CATEGORII_RELEVANTE.some(k => joined.includes(k))
+}
+
 async function fetchStiriJuridice() {
   const now = Date.now()
   if (stiriCache.data && now - stiriCache.ts < STIRI_TTL) return stiriCache.data
@@ -762,6 +773,8 @@ async function fetchStiriJuridice() {
       const title = decodeHtmlEntities(rawTitle)
       const pubDate = (extractOne(item, 'pubDate') || '').trim()
       const cats = extractAll(item, 'category').map(c => stripCdata(c))
+
+      if (!esteRelevant(cats)) return null
 
       return { title, link, pubDate, categorii: cats.slice(0, 2) }
     })
