@@ -724,7 +724,7 @@ app.post('/due-diligence', async (req, res) => {
 // ─── Stiri juridice (juridice.ro RSS) ────────────────────────────────────────
 
 let stiriCache = { data: null, ts: 0 }
-const STIRI_TTL = 30 * 60 * 1000
+const STIRI_TTL = 6 * 60 * 60 * 1000
 
 function decodeHtmlEntities(str) {
   return str
