@@ -505,6 +505,36 @@ app.post('/extract-from-image', async (req, res) => {
   }
 })
 
+// ─── Search firma (autocomplete) ─────────────────────────────────────────────
+
+app.get('/search-firma', async (req, res) => {
+  const q = (req.query.q || '').toString().trim()
+  if (q.length < 3) return res.json({ rezultate: [] })
+
+  try {
+    const resp = await fetch(
+      `https://openapi.ro/api/companies?name=${encodeURIComponent(q)}&limit=7`,
+      {
+        headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
+        signal: AbortSignal.timeout(6000),
+      }
+    )
+    if (!resp.ok) return res.json({ rezultate: [] })
+    const json = await resp.json()
+    const lista = Array.isArray(json) ? json : (json?.data ?? json?.companies ?? [])
+    const rezultate = lista.slice(0, 7).map(f => ({
+      denumire: f.denumire || f.name || f.company_name || null,
+      cui: f.cif || f.cui || f.vat_number || null,
+      judet: f.judet || f.county || null,
+      localitate: f.localitate || f.city || null,
+    })).filter(f => f.denumire && f.cui)
+    res.json({ rezultate })
+  } catch (e) {
+    console.log('[search-firma] Eroare:', e.message)
+    res.json({ rezultate: [] })
+  }
+})
+
 // ─── Due Diligence ───────────────────────────────────────────────────────────
 
 function soapRequestNumeParte(numeParte) {
