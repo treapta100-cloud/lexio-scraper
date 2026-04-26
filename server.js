@@ -526,16 +526,38 @@ app.get('/search-firma', async (req, res) => {
         .trim()
     }
 
-    for (const b of partiBlocks) {
-      const nume = extractOne(b, 'nume')
-      if (!nume) continue
-      if (!nume.toUpperCase().includes(qUpper)) continue
-      const cheie = normalizeaza(nume)
-      if (vazute.has(cheie)) continue
-      vazute.add(cheie)
-      rezultate.push({ denumire: nume, cui: null, judet: null, localitate: null })
+    // Construim map: cheie normalizata → { denumire, instante, nrDosare }
+    const dosareBlocks = extractAll(xml, 'Dosar')
+    const firmeMap = new Map()
+
+    for (const dosar of dosareBlocks) {
+      const institutie = extractOne(dosar, 'institutie') || ''
+      const partiDosar = extractAll(dosar, 'DosarParte')
+      for (const b of partiDosar) {
+        const nume = extractOne(b, 'nume')
+        if (!nume || !nume.toUpperCase().includes(qUpper)) continue
+        const cheie = normalizeaza(nume)
+        if (!firmeMap.has(cheie)) {
+          firmeMap.set(cheie, { denumire: nume, instante: new Set(), nrDosare: 0 })
+        }
+        const entry = firmeMap.get(cheie)
+        entry.nrDosare++
+        if (institutie) entry.instante.add(institutie.replace(/([a-z])([A-Z])/g, '$1 $2'))
+      }
+    }
+
+    for (const [, entry] of firmeMap) {
+      rezultate.push({
+        denumire: entry.denumire,
+        cui: null,
+        judet: null,
+        localitate: [...entry.instante].slice(0, 2).join(', ') || null,
+        nr_dosare: entry.nrDosare,
+      })
       if (rezultate.length >= 6) break
     }
+
+    rezultate.sort((a, b) => (b.nr_dosare || 0) - (a.nr_dosare || 0))
 
     console.log(`[search-firma] "${q}" → ${rezultate.length} sugestii din portal.just.ro`)
     res.json({ rezultate })
