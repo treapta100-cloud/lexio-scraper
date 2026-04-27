@@ -803,28 +803,29 @@ app.get('/stiri-juridice', async (req, res) => {
 let modificariCache = { data: null, ts: 0 }
 const MODIFICARI_TTL = 12 * 60 * 60 * 1000
 
-const TIP_KEYWORDS = [
-  'lege ', 'legea ', 'ordonanță de urgență', 'ordonanta de urgenta',
-  'ordonanță ', 'ordonanta ', 'hotărâre', 'hotarare',
-  'decizie ', 'decret ', 'regulament ', 'instrucțiuni', 'instructiuni',
-  'ordin ', 'norme ',
-]
+function normalizeText(str) {
+  return (str || '').toLowerCase()
+    .replace(/ă/g, 'a').replace(/â/g, 'a').replace(/î/g, 'i')
+    .replace(/ș/g, 's').replace(/ț/g, 't')
+    .replace(/ş/g, 's').replace(/ţ/g, 't')
+}
 
 function determinaTip(titlu) {
-  const t = (titlu || '').toLowerCase()
-  if (/^lege[a ]/.test(t)) return 'Lege'
-  if (t.includes('ordonanță de urgență') || t.includes('ordonanta de urgenta')) return 'OUG'
-  if (/^ordonanț|^ordonant/.test(t)) return 'OG'
-  if (/^hotărâre|^hotarare/.test(t)) return 'HG'
+  const t = normalizeText(titlu)
+  if (/^lege[a\s]/.test(t)) return 'Lege'
+  if (t.includes('ordonanta de urgenta') || t.startsWith('oug ')) return 'OUG'
+  if (/^ordonanta/.test(t)) return 'OG'
+  if (/^hotarare/.test(t)) return 'HG'
   if (/^decizie/.test(t)) return 'Decizie'
   if (/^decret/.test(t)) return 'Decret'
   if (/^ordin/.test(t)) return 'Ordin'
+  if (/^norme/.test(t) || /^regulament/.test(t) || /^instructiuni/.test(t)) return 'Ordin'
   return null
 }
 
 function esteActRelevant(titlu) {
-  const t = (titlu || '').toLowerCase()
-  return TIP_KEYWORDS.some(k => t.startsWith(k) || t.includes(k))
+  const t = normalizeText(titlu)
+  return /^(lege[a\s]|ordonanta|hotarare|decizie|decret|ordin|norme|regulament|instructiuni|oug )/.test(t)
 }
 
 async function fetchModificariLegislative() {
@@ -844,10 +845,10 @@ async function fetchModificariLegislative() {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'ro-RO,ro;q=0.9' })
     await page.goto('https://www.monitoruloficial.ro', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
+      waitUntil: 'networkidle2',
+      timeout: 45000,
     })
-    await new Promise(r => setTimeout(r, 2000))
+    await new Promise(r => setTimeout(r, 3000))
 
     const rezultat = await page.evaluate(() => {
       const acte = []
