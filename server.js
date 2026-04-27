@@ -902,6 +902,27 @@ async function fetchModificariLegislative() {
   return acteRelevante
 }
 
+app.get('/debug-mo', async (req, res) => {
+  try {
+    const resp = await fetch('https://www.monitoruloficial.ro', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ro-RO,ro;q=0.9',
+      },
+      signal: AbortSignal.timeout(20000),
+    })
+    const html = await resp.text()
+    const hasH4 = html.includes('<h4')
+    const hasMonitor = html.includes('Monitorul-Oficial--PI')
+    const idx = html.indexOf('Monitorul-Oficial--PI')
+    const fragment = idx >= 0 ? html.slice(Math.max(0, idx - 200), idx + 500) : 'NU GASIT'
+    res.json({ status: resp.status, length: html.length, hasH4, hasMonitor, fragment })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.get('/modificari-legislative', async (req, res) => {
   try {
     const acte = await fetchModificariLegislative()
