@@ -828,97 +828,78 @@ function esteActRelevant(titlu) {
   return /^(lege[a\s]|ordonanta|hotarare|decizie|decret|ordin|norme|regulament|instructiuni|oug )/.test(t)
 }
 
+function stripTags(str) {
+  return str.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 async function fetchModificariLegislative() {
   const now = Date.now()
   if (modificariCache.data && now - modificariCache.ts < MODIFICARI_TTL) {
     return modificariCache.data
   }
 
-  const browser = await puppeteer.launch({
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    headless: true,
+  const resp = await fetch('https://www.monitoruloficial.ro', {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'ro-RO,ro;q=0.9,en;q=0.8',
+    },
+    signal: AbortSignal.timeout(20000),
   })
+  if (!resp.ok) throw new Error(`monitoruloficial.ro HTTP ${resp.status}`)
+  const html = await resp.text()
 
-  try {
-    const page = await browser.newPage()
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'ro-RO,ro;q=0.9' })
-    await page.goto('https://www.monitoruloficial.ro', {
-      waitUntil: 'networkidle2',
-      timeout: 45000,
-    })
-    await new Promise(r => setTimeout(r, 3000))
+  // Structura reala: <h4><a href="/Monitorul-Oficial--PI--NR--AN.html">...</a></h4>
+  // urmat de <p>Emitent - Titlu</p><p>Nr. X | Data</p>
+  const acte = []
+  const BASE = 'https://www.monitoruloficial.ro'
 
-    const rezultat = await page.evaluate(() => {
-      const acte = []
+  // Gaseste toate blocurile h4 + p + p
+  const blockRe = /<h4[^>]*>\s*<a[^>]+href="([^"]*Monitorul-Oficial--PI[^"]*)"[^>]*>([\s\S]*?)<\/a>\s*<\/h4>\s*<p[^>]*>([\s\S]*?)<\/p>\s*<p[^>]*>([\s\S]*?)<\/p>/gi
+  let m
+  while ((m = blockRe.exec(html)) !== null) {
+    const href = m[1].startsWith('http') ? m[1] : BASE + m[1]
+    const moText = stripTags(m[2])
+    const continutP1 = stripTags(m[3])
+    const continutP2 = stripTags(m[4])
 
-      // Structura MO: fiecare act e un <h4> cu link catre editia MO,
-      // urmat de <p> cu "Emitent - Titlu act" si <p> cu "Nr. X | Data"
-      const h4List = Array.from(document.querySelectorAll('h4'))
+    const moMatch = moText.match(/nr\.\s*(\d+)\s+din\s+(.+)/i)
+    const numarMo = moMatch ? moMatch[1].trim() : ''
+    const dataMo = moMatch ? moMatch[2].trim() : ''
 
-      for (const h4 of h4List) {
-        const linkEl = h4.querySelector('a')
-        if (!linkEl) continue
+    const dashIdx = continutP1.indexOf(' - ')
+    const titlu = dashIdx >= 0 ? continutP1.slice(dashIdx + 3).trim() : continutP1
+    const emitent = dashIdx >= 0 ? continutP1.slice(0, dashIdx).trim() : ''
 
-        const href = linkEl.href || ''
-        if (!href.includes('Monitorul-Oficial--PI')) continue
+    const numMatch = continutP2.match(/Nr\.\s*([^|]+)\s*\|\s*(.+)/i)
+    const numarAct = numMatch ? numMatch[1].trim() : ''
 
-        // Extrage nr si data din textul linkului: "M. Of. nr. 333 din 27 Aprilie 2026"
-        const moText = (linkEl.textContent || '').trim()
-        const moMatch = moText.match(/nr\.\s*(\d+)\s+din\s+(.+)/i)
-        const numarMo = moMatch ? moMatch[1].trim() : ''
-        const dataMo = moMatch ? moMatch[2].trim() : ''
-
-        // Primul <p> urmator contine "Emitent - Titlu act"
-        const p1 = h4.nextElementSibling
-        if (!p1 || p1.tagName !== 'P') continue
-        const continutP1 = (p1.textContent || '').trim()
-        if (!continutP1) continue
-
-        // Separa emitentul de titlu la primul " - "
-        const dashIdx = continutP1.indexOf(' - ')
-        const titlu = dashIdx >= 0 ? continutP1.slice(dashIdx + 3).trim() : continutP1
-        const emitent = dashIdx >= 0 ? continutP1.slice(0, dashIdx).trim() : ''
-
-        // Al doilea <p> contine "Nr. X | Data"
-        const p2 = p1.nextElementSibling
-        let numarAct = ''
-        if (p2 && p2.tagName === 'P') {
-          const numMatch = (p2.textContent || '').match(/Nr\.\s*([^|]+)\s*\|\s*(.+)/i)
-          if (numMatch) numarAct = numMatch[1].trim()
-        }
-
-        acte.push({ titlu, emitent, numarAct, href, numarMo, dataMo })
-      }
-
-      return { acte, totalGasite: acte.length }
-    })
-
-    console.log(`[modificari-legislative] Total acte gasite: ${rezultat.totalGasite}`)
-
-    const acteRelevante = rezultat.acte
-      .filter(a => esteActRelevant(a.titlu))
-      .map(a => ({
-        titlu: a.numarAct && a.numarAct !== '-'
-          ? `${a.titlu} (nr. ${a.numarAct})`
-          : a.titlu,
-        tip: determinaTip(a.titlu) || 'Act',
-        emitent: a.emitent,
-        numar_mo: a.numarMo,
-        data: a.dataMo,
-        link: a.href,
-      }))
-      .filter((a, i, arr) => arr.findIndex(b => b.titlu === a.titlu) === i)
-      .slice(0, 20)
-
-    console.log(`[modificari-legislative] Acte relevante: ${acteRelevante.length}`)
-
-    modificariCache = { data: acteRelevante, ts: now }
-    return acteRelevante
-  } finally {
-    await browser.close()
+    if (titlu && titlu.length > 5) {
+      acte.push({ titlu, emitent, numarAct, href, numarMo, dataMo })
+    }
   }
+
+  console.log(`[modificari-legislative] Total acte gasite: ${acte.length}`)
+
+  const acteRelevante = acte
+    .filter(a => esteActRelevant(a.titlu))
+    .map(a => ({
+      titlu: a.numarAct && a.numarAct !== '-'
+        ? `${a.titlu} (nr. ${a.numarAct})`
+        : a.titlu,
+      tip: determinaTip(a.titlu) || 'Act',
+      emitent: a.emitent,
+      numar_mo: a.numarMo,
+      data: a.dataMo,
+      link: a.href,
+    }))
+    .filter((a, i, arr) => arr.findIndex(b => b.titlu === a.titlu) === i)
+    .slice(0, 20)
+
+  console.log(`[modificari-legislative] Acte relevante: ${acteRelevante.length}`)
+
+  modificariCache = { data: acteRelevante, ts: now }
+  return acteRelevante
 }
 
 app.get('/modificari-legislative', async (req, res) => {
