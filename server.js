@@ -798,5 +798,118 @@ app.get('/stiri-juridice', async (req, res) => {
   }
 })
 
+// ─── Modificari legislative (Monitorul Oficial) ──────────────────────────────
+
+let modificariCache = { data: null, ts: 0 }
+const MODIFICARI_TTL = 12 * 60 * 60 * 1000
+
+const TIP_KEYWORDS = [
+  'lege ', 'legea ', 'ordonanță de urgență', 'ordonanta de urgenta',
+  'ordonanță ', 'ordonanta ', 'hotărâre', 'hotarare',
+  'decizie ', 'decret ', 'regulament ', 'instrucțiuni', 'instructiuni',
+  'ordin ', 'norme ',
+]
+
+function determinaTip(titlu) {
+  const t = (titlu || '').toLowerCase()
+  if (/^lege[a ]/.test(t)) return 'Lege'
+  if (t.includes('ordonanță de urgență') || t.includes('ordonanta de urgenta')) return 'OUG'
+  if (/^ordonanț|^ordonant/.test(t)) return 'OG'
+  if (/^hotărâre|^hotarare/.test(t)) return 'HG'
+  if (/^decizie/.test(t)) return 'Decizie'
+  if (/^decret/.test(t)) return 'Decret'
+  if (/^ordin/.test(t)) return 'Ordin'
+  return null
+}
+
+function esteActRelevant(titlu) {
+  const t = (titlu || '').toLowerCase()
+  return TIP_KEYWORDS.some(k => t.startsWith(k) || t.includes(k))
+}
+
+async function fetchModificariLegislative() {
+  const now = Date.now()
+  if (modificariCache.data && now - modificariCache.ts < MODIFICARI_TTL) {
+    return modificariCache.data
+  }
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    headless: true,
+  })
+
+  try {
+    const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'ro-RO,ro;q=0.9' })
+    await page.goto('https://www.monitoruloficial.ro', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    })
+    await new Promise(r => setTimeout(r, 2000))
+
+    const rezultat = await page.evaluate(() => {
+      const acte = []
+      let numarMo = ''
+      let dataMo = ''
+
+      // Cauta numarul si data MO din text
+      const allText = document.body.innerText || ''
+      const moMatch = allText.match(/M\.\s*Of\.\s*(?:nr\.)?\s*(\d+)\s*din\s*([^\n\r]+)/i)
+      if (moMatch) {
+        numarMo = moMatch[1].trim()
+        dataMo = moMatch[2].trim().split('\n')[0].trim()
+      }
+
+      // Colecteaza toate link-urile cu texte de acte normative
+      const links = Array.from(document.querySelectorAll('a'))
+      for (const a of links) {
+        const titlu = (a.innerText || a.textContent || '').trim()
+        if (!titlu || titlu.length < 10 || titlu.length > 400) continue
+        const href = a.href || ''
+        if (!href || href === '#' || href.includes('javascript:')) continue
+
+        acte.push({
+          titlu,
+          href,
+          numarMo,
+          dataMo,
+        })
+      }
+
+      return { acte, numarMo, dataMo }
+    })
+
+    const acteRelevante = rezultat.acte
+      .filter(a => esteActRelevant(a.titlu))
+      .map(a => ({
+        titlu: a.titlu.replace(/\s+/g, ' ').trim(),
+        tip: determinaTip(a.titlu) || 'Act',
+        numar_mo: a.numarMo || rezultat.numarMo,
+        data: a.dataMo || rezultat.dataMo,
+        link: a.href,
+      }))
+      // Deduplicare pe titlu
+      .filter((a, i, arr) => arr.findIndex(b => b.titlu === a.titlu) === i)
+      .slice(0, 20)
+
+    modificariCache = { data: acteRelevante, ts: now }
+    return acteRelevante
+  } finally {
+    await browser.close()
+  }
+}
+
+app.get('/modificari-legislative', async (req, res) => {
+  try {
+    const acte = await fetchModificariLegislative()
+    res.json({ acte })
+  } catch (e) {
+    console.log('[modificari-legislative] Eroare:', e.message)
+    res.status(502).json({ acte: [], error: e.message })
+  }
+})
+
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
