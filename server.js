@@ -855,32 +855,61 @@ async function fetchModificariLegislative() {
       let numarMo = ''
       let dataMo = ''
 
-      // Cauta numarul si data MO din text
+      // Cauta numarul si data MO din tot textul paginii
       const allText = document.body.innerText || ''
-      const moMatch = allText.match(/M\.\s*Of\.\s*(?:nr\.)?\s*(\d+)\s*din\s*([^\n\r]+)/i)
+      const moMatch = allText.match(/M(?:onitorul)?\.\s*Of(?:icial)?\.\s*(?:nr\.)?\s*(\d+)\s*(?:din|\/)\s*([0-9A-Za-z\s]+(?:20\d{2}))/i)
       if (moMatch) {
         numarMo = moMatch[1].trim()
-        dataMo = moMatch[2].trim().split('\n')[0].trim()
+        dataMo = moMatch[2].trim()
       }
 
-      // Colecteaza toate link-urile cu texte de acte normative
-      const links = Array.from(document.querySelectorAll('a'))
-      for (const a of links) {
-        const titlu = (a.innerText || a.textContent || '').trim()
-        if (!titlu || titlu.length < 10 || titlu.length > 400) continue
-        const href = a.href || ''
-        if (!href || href === '#' || href.includes('javascript:')) continue
+      // Incercam mai intai selectori specifici pentru sectiunea de acte recente
+      const SELECTORS = [
+        '.acte-recente a', '.recent-acts a', '.acte-normative a',
+        '#acte-recente a', '#recent a', '.lista-acte a',
+        'table a', '.content-area a', '.main-content a',
+        'article a', '.entry-content a', '.post-content a',
+      ]
 
-        acte.push({
-          titlu,
-          href,
-          numarMo,
-          dataMo,
-        })
+      let linkElements = []
+      for (const sel of SELECTORS) {
+        try {
+          const els = Array.from(document.querySelectorAll(sel))
+          if (els.length > 0) linkElements.push(...els)
+        } catch (e) {}
       }
 
-      return { acte, numarMo, dataMo }
+      // Fallback: toate link-urile de pe pagina
+      if (linkElements.length === 0) {
+        linkElements = Array.from(document.querySelectorAll('a'))
+      }
+
+      // Deduplicare href
+      const vazute = new Set()
+      for (const a of linkElements) {
+        const titlu = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ')
+        if (!titlu || titlu.length < 15 || titlu.length > 500) continue
+
+        const href = (a.href || '').trim()
+        if (!href || href === '#' || href.includes('javascript:') || vazute.has(href)) continue
+
+        // Exclude link-uri de navigare (meniu, footer, social)
+        const hrefLower = href.toLowerCase()
+        if (
+          hrefLower.includes('facebook') || hrefLower.includes('twitter') ||
+          hrefLower.includes('linkedin') || hrefLower.includes('mailto:') ||
+          hrefLower.includes('/contact') || hrefLower.includes('/despre') ||
+          hrefLower.includes('/despre-noi') || hrefLower.includes('/about')
+        ) continue
+
+        vazute.add(href)
+        acte.push({ titlu, href, numarMo, dataMo })
+      }
+
+      return { acte, numarMo, dataMo, totalGasite: acte.length }
     })
+
+    console.log(`[modificari-legislative] Total link-uri gasite: ${rezultat.totalGasite}, MO nr: ${rezultat.numarMo}`)
 
     const acteRelevante = rezultat.acte
       .filter(a => esteActRelevant(a.titlu))
@@ -891,9 +920,10 @@ async function fetchModificariLegislative() {
         data: a.dataMo || rezultat.dataMo,
         link: a.href,
       }))
-      // Deduplicare pe titlu
       .filter((a, i, arr) => arr.findIndex(b => b.titlu === a.titlu) === i)
       .slice(0, 20)
+
+    console.log(`[modificari-legislative] Acte relevante filtrate: ${acteRelevante.length}`)
 
     modificariCache = { data: acteRelevante, ts: now }
     return acteRelevante
