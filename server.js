@@ -800,7 +800,7 @@ app.get('/stiri-juridice', async (req, res) => {
 
 // ─── Modificari legislative (Monitorul Oficial) ──────────────────────────────
 
-let modificariCache = { data: null, ts: 0 }
+let modificariCache = { data: null, ts: 0 } // v3
 const MODIFICARI_TTL = 12 * 60 * 60 * 1000
 
 function normalizeText(str) {
@@ -852,78 +852,67 @@ async function fetchModificariLegislative() {
 
     const rezultat = await page.evaluate(() => {
       const acte = []
-      let numarMo = ''
-      let dataMo = ''
 
-      // Cauta numarul si data MO din tot textul paginii
-      const allText = document.body.innerText || ''
-      const moMatch = allText.match(/M(?:onitorul)?\.\s*Of(?:icial)?\.\s*(?:nr\.)?\s*(\d+)\s*(?:din|\/)\s*([0-9A-Za-z\s]+(?:20\d{2}))/i)
-      if (moMatch) {
-        numarMo = moMatch[1].trim()
-        dataMo = moMatch[2].trim()
+      // Structura MO: fiecare act e un <h4> cu link catre editia MO,
+      // urmat de <p> cu "Emitent - Titlu act" si <p> cu "Nr. X | Data"
+      const h4List = Array.from(document.querySelectorAll('h4'))
+
+      for (const h4 of h4List) {
+        const linkEl = h4.querySelector('a')
+        if (!linkEl) continue
+
+        const href = linkEl.href || ''
+        if (!href.includes('Monitorul-Oficial--PI')) continue
+
+        // Extrage nr si data din textul linkului: "M. Of. nr. 333 din 27 Aprilie 2026"
+        const moText = (linkEl.textContent || '').trim()
+        const moMatch = moText.match(/nr\.\s*(\d+)\s+din\s+(.+)/i)
+        const numarMo = moMatch ? moMatch[1].trim() : ''
+        const dataMo = moMatch ? moMatch[2].trim() : ''
+
+        // Primul <p> urmator contine "Emitent - Titlu act"
+        const p1 = h4.nextElementSibling
+        if (!p1 || p1.tagName !== 'P') continue
+        const continutP1 = (p1.textContent || '').trim()
+        if (!continutP1) continue
+
+        // Separa emitentul de titlu la primul " - "
+        const dashIdx = continutP1.indexOf(' - ')
+        const titlu = dashIdx >= 0 ? continutP1.slice(dashIdx + 3).trim() : continutP1
+        const emitent = dashIdx >= 0 ? continutP1.slice(0, dashIdx).trim() : ''
+
+        // Al doilea <p> contine "Nr. X | Data"
+        const p2 = p1.nextElementSibling
+        let numarAct = ''
+        if (p2 && p2.tagName === 'P') {
+          const numMatch = (p2.textContent || '').match(/Nr\.\s*([^|]+)\s*\|\s*(.+)/i)
+          if (numMatch) numarAct = numMatch[1].trim()
+        }
+
+        acte.push({ titlu, emitent, numarAct, href, numarMo, dataMo })
       }
 
-      // Incercam mai intai selectori specifici pentru sectiunea de acte recente
-      const SELECTORS = [
-        '.acte-recente a', '.recent-acts a', '.acte-normative a',
-        '#acte-recente a', '#recent a', '.lista-acte a',
-        'table a', '.content-area a', '.main-content a',
-        'article a', '.entry-content a', '.post-content a',
-      ]
-
-      let linkElements = []
-      for (const sel of SELECTORS) {
-        try {
-          const els = Array.from(document.querySelectorAll(sel))
-          if (els.length > 0) linkElements.push(...els)
-        } catch (e) {}
-      }
-
-      // Fallback: toate link-urile de pe pagina
-      if (linkElements.length === 0) {
-        linkElements = Array.from(document.querySelectorAll('a'))
-      }
-
-      // Deduplicare href
-      const vazute = new Set()
-      for (const a of linkElements) {
-        const titlu = (a.innerText || a.textContent || '').trim().replace(/\s+/g, ' ')
-        if (!titlu || titlu.length < 15 || titlu.length > 500) continue
-
-        const href = (a.href || '').trim()
-        if (!href || href === '#' || href.includes('javascript:') || vazute.has(href)) continue
-
-        // Exclude link-uri de navigare (meniu, footer, social)
-        const hrefLower = href.toLowerCase()
-        if (
-          hrefLower.includes('facebook') || hrefLower.includes('twitter') ||
-          hrefLower.includes('linkedin') || hrefLower.includes('mailto:') ||
-          hrefLower.includes('/contact') || hrefLower.includes('/despre') ||
-          hrefLower.includes('/despre-noi') || hrefLower.includes('/about')
-        ) continue
-
-        vazute.add(href)
-        acte.push({ titlu, href, numarMo, dataMo })
-      }
-
-      return { acte, numarMo, dataMo, totalGasite: acte.length }
+      return { acte, totalGasite: acte.length }
     })
 
-    console.log(`[modificari-legislative] Total link-uri gasite: ${rezultat.totalGasite}, MO nr: ${rezultat.numarMo}`)
+    console.log(`[modificari-legislative] Total acte gasite: ${rezultat.totalGasite}`)
 
     const acteRelevante = rezultat.acte
       .filter(a => esteActRelevant(a.titlu))
       .map(a => ({
-        titlu: a.titlu.replace(/\s+/g, ' ').trim(),
+        titlu: a.numarAct && a.numarAct !== '-'
+          ? `${a.titlu} (nr. ${a.numarAct})`
+          : a.titlu,
         tip: determinaTip(a.titlu) || 'Act',
-        numar_mo: a.numarMo || rezultat.numarMo,
-        data: a.dataMo || rezultat.dataMo,
+        emitent: a.emitent,
+        numar_mo: a.numarMo,
+        data: a.dataMo,
         link: a.href,
       }))
       .filter((a, i, arr) => arr.findIndex(b => b.titlu === a.titlu) === i)
       .slice(0, 20)
 
-    console.log(`[modificari-legislative] Acte relevante filtrate: ${acteRelevante.length}`)
+    console.log(`[modificari-legislative] Acte relevante: ${acteRelevante.length}`)
 
     modificariCache = { data: acteRelevante, ts: now }
     return acteRelevante
