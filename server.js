@@ -849,33 +849,26 @@ async function fetchModificariLegislative() {
   if (!resp.ok) throw new Error(`monitoruloficial.ro HTTP ${resp.status}`)
   const html = await resp.text()
 
-  // Structura reala: <h4><a href="/Monitorul-Oficial--PI--NR--AN.html">...</a></h4>
-  // urmat de <p>Emitent - Titlu</p><p>Nr. X | Data</p>
+  // Structura reala confirmata:
+  // <h4 style="..."><a href="/Monitorul-Oficial--PI--NR--AN.html" target="_blank">
+  //   <i class="fas fa-file-pdf"></i> M. Of. nr. <strong>NR</strong> din <strong>DATA</strong>
+  // </a></h4>
+  // <p class="pemt">Emitent</p>
+  // <p style="text-align:justify;">Titlu act</p>
   const acte = []
   const BASE = 'https://www.monitoruloficial.ro'
 
-  // Gaseste toate blocurile h4 + p + p
-  const blockRe = /<h4[^>]*>\s*<a[^>]+href="([^"]*Monitorul-Oficial--PI[^"]*)"[^>]*>([\s\S]*?)<\/a>\s*<\/h4>\s*<p[^>]*>([\s\S]*?)<\/p>\s*<p[^>]*>([\s\S]*?)<\/p>/gi
+  const blockRe = /<h4[^>]*>\s*<a[^>]+href="(\/Monitorul-Oficial--PI[^"]+)"[^>]*>[\s\S]*?<strong>(\d+)<\/strong>\s*din\s*<strong>([^<]+)<\/strong>[\s\S]*?<\/a>\s*<\/h4>\s*<p[^>]*class="pemt"[^>]*>([\s\S]*?)<\/p>\s*<p[^>]*>([\s\S]*?)<\/p>/gi
   let m
   while ((m = blockRe.exec(html)) !== null) {
-    const href = m[1].startsWith('http') ? m[1] : BASE + m[1]
-    const moText = stripTags(m[2])
-    const continutP1 = stripTags(m[3])
-    const continutP2 = stripTags(m[4])
-
-    const moMatch = moText.match(/nr\.\s*(\d+)\s+din\s+(.+)/i)
-    const numarMo = moMatch ? moMatch[1].trim() : ''
-    const dataMo = moMatch ? moMatch[2].trim() : ''
-
-    const dashIdx = continutP1.indexOf(' - ')
-    const titlu = dashIdx >= 0 ? continutP1.slice(dashIdx + 3).trim() : continutP1
-    const emitent = dashIdx >= 0 ? continutP1.slice(0, dashIdx).trim() : ''
-
-    const numMatch = continutP2.match(/Nr\.\s*([^|]+)\s*\|\s*(.+)/i)
-    const numarAct = numMatch ? numMatch[1].trim() : ''
+    const href = BASE + m[1]
+    const numarMo = m[2].trim()
+    const dataMo = m[3].trim()
+    const emitent = stripTags(m[4]).trim()
+    const titlu = stripTags(m[5]).trim()
 
     if (titlu && titlu.length > 5) {
-      acte.push({ titlu, emitent, numarAct, href, numarMo, dataMo })
+      acte.push({ titlu, emitent, href, numarMo, dataMo })
     }
   }
 
@@ -884,9 +877,7 @@ async function fetchModificariLegislative() {
   const acteRelevante = acte
     .filter(a => esteActRelevant(a.titlu))
     .map(a => ({
-      titlu: a.numarAct && a.numarAct !== '-'
-        ? `${a.titlu} (nr. ${a.numarAct})`
-        : a.titlu,
+      titlu: a.titlu,
       tip: determinaTip(a.titlu) || 'Act',
       emitent: a.emitent,
       numar_mo: a.numarMo,
