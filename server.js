@@ -801,7 +801,7 @@ app.get('/stiri-juridice', async (req, res) => {
 // ─── Modificari legislative (Monitorul Oficial) ──────────────────────────────
 
 let modificariCache = { data: null, ts: 0 } // v3
-const MODIFICARI_TTL = 12 * 60 * 60 * 1000
+const MODIFICARI_TTL = 60 * 60 * 1000
 
 function normalizeText(str) {
   return (str || '').toLowerCase()
