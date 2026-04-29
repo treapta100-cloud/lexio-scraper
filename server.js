@@ -896,7 +896,7 @@ async function fetchModificariLegislative() {
 app.get('/modificari-legislative', async (req, res) => {
   try {
     const acte = await fetchModificariLegislative()
-    res.json({ acte })
+    res.json({ acte, last_updated: modificariCache.ts || Date.now() })
   } catch (e) {
     console.log('[modificari-legislative] Eroare:', e.message)
     res.status(502).json({ acte: [], error: e.message })
