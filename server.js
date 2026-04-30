@@ -2,22 +2,36 @@ const express = require('express')
 const puppeteer = require('puppeteer-core')
 const http = require('http')
 const rateLimit = require('express-rate-limit')
+const { createClient } = require('@supabase/supabase-js')
 
 const app = express()
 app.use(express.json({ limit: '10mb' }))
 
 const API_KEY = process.env.SCRAPER_API_KEY
+const SUPABASE_URL = process.env.SUPABASE_URL
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
 
-function requireApiKey(req, res, next) {
-  if (!API_KEY) {
-    console.error('[SECURITY] SCRAPER_API_KEY env var is not set — refusing all requests')
-    return res.status(503).json({ error: 'Server misconfigured' })
+const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null
+
+async function requireAuth(req, res, next) {
+  // Metoda 1 (legacy): API key static
+  const apiKey = req.headers['x-api-key']
+  if (API_KEY && apiKey === API_KEY) return next()
+
+  // Metoda 2 (noua): Supabase JWT
+  const authHeader = req.headers['authorization']
+  if (authHeader?.startsWith('Bearer ') && supabase) {
+    const token = authHeader.slice(7)
+    const { data: { user }, error } = await supabase.auth.getUser(token)
+    if (!error && user) {
+      req.user = user
+      return next()
+    }
   }
-  const key = req.headers['x-api-key']
-  if (!key || key !== API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' })
-  }
-  next()
+
+  return res.status(401).json({ error: 'Unauthorized' })
 }
 
 // Rate limiting: max 60 req/minut per IP
@@ -30,7 +44,7 @@ const limiter = rateLimit({
 })
 
 app.use(limiter)
-app.use(requireApiKey)
+app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
 const DOSAR_REGEX = /^\d{1,6}\/\d{1,4}\/\d{4}$/
