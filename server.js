@@ -1,6 +1,7 @@
 const express = require('express')
 const puppeteer = require('puppeteer-core')
 const http = require('http')
+const rateLimit = require('express-rate-limit')
 
 const app = express()
 app.use(express.json({ limit: '10mb' }))
@@ -8,7 +9,10 @@ app.use(express.json({ limit: '10mb' }))
 const API_KEY = process.env.SCRAPER_API_KEY
 
 function requireApiKey(req, res, next) {
-  if (!API_KEY) return next()
+  if (!API_KEY) {
+    console.error('[SECURITY] SCRAPER_API_KEY env var is not set — refusing all requests')
+    return res.status(503).json({ error: 'Server misconfigured' })
+  }
   const key = req.headers['x-api-key']
   if (!key || key !== API_KEY) {
     return res.status(401).json({ error: 'Unauthorized' })
@@ -16,6 +20,16 @@ function requireApiKey(req, res, next) {
   next()
 }
 
+// Rate limiting: max 60 req/minut per IP
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+})
+
+app.use(limiter)
 app.use(requireApiKey)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
