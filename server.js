@@ -6,6 +6,7 @@ const cron = require('node-cron')
 const { createClient } = require('@supabase/supabase-js')
 
 const app = express()
+app.set('trust proxy', 1)
 app.use(express.json({ limit: '10mb' }))
 
 const API_KEY = process.env.SCRAPER_API_KEY
@@ -965,52 +966,54 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     const url = `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
     console.log(`[legislatie] Scrapez: ${actNormativ} → ${url}`)
 
-    await page.goto(url, { waitUntil: 'networkidle0', timeout: 90000 })
-    await new Promise(r => setTimeout(r, 4000))
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
+    // Asteapta continut dinamic sa se incarce
+    await new Promise(r => setTimeout(r, 8000))
+
+    // Incearca sa scrolleze pagina ca sa trigger lazy loading
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight / 2)
+    })
+    await new Promise(r => setTimeout(r, 3000))
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight)
+    })
+    await new Promise(r => setTimeout(r, 3000))
 
     const articole = await page.evaluate((actNormativ, domeniu) => {
       const results = []
       const seen = new Set()
 
-      // Cauta toate elementele care par a fi articole
-      const allEls = document.querySelectorAll('[id], p, div, span')
+      // Extrage tot textul paginii si parseaza articolele
+      const bodyText = document.body.innerText || ''
 
-      allEls.forEach(el => {
-        const text = el.innerText?.trim() || ''
-        if (!text || text.length < 20) return
+      // Split dupa pattern articol
+      const artRegex = /(Art\.?\s*\d+[a-z]?(?:\^?\d+)?)\s*[-—.]?\s*([^\n]*)\n([\s\S]*?)(?=Art\.?\s*\d+[a-z]?(?:\^?\d+)?\s*[-—.]|$)/gi
 
-        // Detecteaza pattern articol: "Art. 123" sau "Articolul 123"
-        const artMatch = text.match(/^(Art\.?\s*\d+[a-z]?|Articolul\s+\d+[a-z]?)\s*[-—.]?\s*(.*)/s)
-        if (!artMatch) return
-
-        const nrArticol = artMatch[1].replace(/\s+/g, ' ').trim()
-        if (seen.has(nrArticol)) return
+      let match
+      while ((match = artRegex.exec(bodyText)) !== null) {
+        const nrArticol = match[1].replace(/\s+/g, ' ').trim()
+        if (seen.has(nrArticol)) continue
         seen.add(nrArticol)
 
-        const restText = artMatch[2].trim()
-        const lines = restText.split('\n').map(l => l.trim()).filter(Boolean)
+        const titluRaw = match[2].trim()
+        const textRaw = match[3].trim()
 
-        // Prima linie dupa nr = titlu (daca e scurta si nu contine punct)
-        let titluArticol = null
-        let textArticol = restText
+        const titluArticol = titluRaw.length > 0 && titluRaw.length < 150 ? titluRaw : null
+        const textArticol = textRaw.length > 10 ? textRaw.replace(/\s+/g, ' ').trim() : titluRaw
 
-        if (lines.length > 1 && lines[0].length < 120 && !lines[0].includes('.')) {
-          titluArticol = lines[0]
-          textArticol = lines.slice(1).join(' ').trim()
-        }
-
-        if (!textArticol || textArticol.length < 15) return
+        if (!textArticol || textArticol.length < 10) continue
 
         results.push({
           act_normativ: actNormativ,
           domeniu,
           nr_articol: nrArticol,
-          titlu_articol: titluArticol || null,
+          titlu_articol: titluArticol,
           text_articol: textArticol.substring(0, 5000),
           mo_nr: null,
           mo_data: null,
         })
-      })
+      }
 
       return results
     }, actNormativ, domeniu)
