@@ -46,6 +46,7 @@ const limiter = rateLimit({
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   message: { error: 'Too many requests, please try again later.' },
 })
 
@@ -963,32 +964,49 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     const page = await browser.newPage()
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36')
 
-    const url = `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
-    console.log(`[legislatie] Scrapez: ${actNormativ} → ${url}`)
-
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 })
-    // Asteapta continut dinamic sa se incarce
-    await new Promise(r => setTimeout(r, 8000))
-
-    // Incearca sa scrolleze pagina ca sa trigger lazy loading
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight / 2)
-    })
-    await new Promise(r => setTimeout(r, 3000))
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight)
-    })
+    // Pas 1: incarca TOC ca sa gasim ID-ul documentului randat
+    const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
+    console.log(`[legislatie] Scrapez TOC: ${actNormativ}`)
+    await page.goto(tocUrl, { waitUntil: 'networkidle2', timeout: 60000 })
     await new Promise(r => setTimeout(r, 3000))
 
+    // Gaseste linkul catre documentul cu text complet
+    const docUrl = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href*="DetaliiDocument"]'))
+      for (const link of links) {
+        const href = link.href || ''
+        if (href.includes('DetaliiDocument/') && !href.includes('Afis')) {
+          return href.split('#')[0]
+        }
+      }
+      return null
+    })
+
+    const targetUrl = docUrl || `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
+    console.log(`[legislatie] URL document: ${targetUrl}`)
+
+    // Pas 2: incarca documentul cu text complet
+    await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 })
+    await new Promise(r => setTimeout(r, 6000))
+
+    // Scroll progresiv pentru lazy loading
+    const scrollSteps = 10
+    for (let i = 1; i <= scrollSteps; i++) {
+      await page.evaluate((step, total) => {
+        window.scrollTo(0, (document.body.scrollHeight / total) * step)
+      }, i, scrollSteps)
+      await new Promise(r => setTimeout(r, 800))
+    }
+    await new Promise(r => setTimeout(r, 3000))
+
+    // Pas 3: extrage text complet si parseaza articolele
     const articole = await page.evaluate((actNormativ, domeniu) => {
       const results = []
       const seen = new Set()
+      const bodyText = (document.body.innerText || '').replace(/\r\n/g, '\n')
 
-      // Extrage tot textul paginii si parseaza articolele
-      const bodyText = document.body.innerText || ''
-
-      // Split dupa pattern articol
-      const artRegex = /(Art\.?\s*\d+[a-z]?(?:\^?\d+)?)\s*[-—.]?\s*([^\n]*)\n([\s\S]*?)(?=Art\.?\s*\d+[a-z]?(?:\^?\d+)?\s*[-—.]|$)/gi
+      // Pattern robust pentru articole romanesti
+      const artRegex = /\b(Art(?:icolul)?\.?\s*\d+[¹²³⁰-⁹]*[a-z]?)\s*[-—.]?\s*([^\n]{0,150})\n([\s\S]{10,2000}?)(?=\n\s*\bArt(?:icolul)?\.?\s*\d+|\n\s*TITLUL|\n\s*CAPITOLUL|\n\s*SECTIUNEA|$)/gi
 
       let match
       while ((match = artRegex.exec(bodyText)) !== null) {
@@ -997,19 +1015,16 @@ async function scrapeLege(docId, actNormativ, domeniu) {
         seen.add(nrArticol)
 
         const titluRaw = match[2].trim()
-        const textRaw = match[3].trim()
+        const textRaw = match[3].replace(/\s+/g, ' ').trim()
 
-        const titluArticol = titluRaw.length > 0 && titluRaw.length < 150 ? titluRaw : null
-        const textArticol = textRaw.length > 10 ? textRaw.replace(/\s+/g, ' ').trim() : titluRaw
-
-        if (!textArticol || textArticol.length < 10) continue
+        if (textRaw.length < 10) continue
 
         results.push({
           act_normativ: actNormativ,
           domeniu,
           nr_articol: nrArticol,
-          titlu_articol: titluArticol,
-          text_articol: textArticol.substring(0, 5000),
+          titlu_articol: titluRaw.length > 0 && titluRaw.length < 150 ? titluRaw : null,
+          text_articol: textRaw.substring(0, 5000),
           mo_nr: null,
           mo_data: null,
         })
