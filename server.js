@@ -954,7 +954,6 @@ const LEGI = [
 ]
 
 async function scrapeLege(docId, actNormativ, domeniu) {
-  // Incarca articolele deja existente in DB pentru resume
   const existingNrs = new Set()
   if (supabase) {
     const { data: existing } = await supabase
@@ -962,125 +961,107 @@ async function scrapeLege(docId, actNormativ, domeniu) {
       .select('nr_articol')
       .eq('act_normativ', actNormativ)
     ;(existing || []).forEach(r => existingNrs.add(r.nr_articol))
-    console.log(`[legislatie] ${actNormativ}: ${existingNrs.size} articole deja in DB, continuam de unde am ramas`)
+    console.log(`[legislatie] ${actNormativ}: ${existingNrs.size} articole deja in DB`)
   }
 
-  const browser = await puppeteer.launch({
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    headless: true,
-  })
+  const fetchHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ro-RO,ro;q=0.9,en;q=0.8',
+  }
 
-  try {
-    const page = await browser.newPage()
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36')
+  // Pas 1: fetch TOC → extrage URL document real + toti anchorii
+  const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
+  console.log(`[legislatie] Fetch TOC: ${actNormativ}`)
+  const tocResp = await fetch(tocUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(30000) })
+  if (!tocResp.ok) throw new Error(`TOC HTTP ${tocResp.status}`)
+  const tocHtml = await tocResp.text()
 
-    // Pas 1: incarca TOC → extrage URL document + toti anchorii articolelor
-    const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
-    console.log(`[legislatie] Scrapez TOC: ${actNormativ}`)
-    await page.goto(tocUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    // Asteapta pana cand JS randeaza linkurile de articole
-    try {
-      await page.waitForFunction(
-        () => document.querySelectorAll('a[href*="#id_art"]').length > 0,
-        { timeout: 20000 }
-      )
-    } catch (_) {
-      await new Promise(r => setTimeout(r, 8000))
-    }
+  // Extrage ID-ul real al documentului din link-uri de tip /Public/DetaliiDocument/XXXXX
+  const docIdMatch = tocHtml.match(/href="\/Public\/DetaliiDocument\/(\d+)[#"]/)
+  const realDocId = docIdMatch ? docIdMatch[1] : String(docId)
+  const docUrl = `https://legislatie.just.ro/Public/DetaliiDocument/${realDocId}`
 
-    const tocData = await page.evaluate((tocId) => {
-      const result = { docUrl: null, anchors: [] }
-      const allLinks = Array.from(document.querySelectorAll('a'))
+  // Extrage toti anchorii articolelor (id_art...)
+  const anchors = []
+  const seen = new Set()
+  for (const m of tocHtml.matchAll(/href="[^"]*#(id_art[^"&]+)"/g)) {
+    if (!seen.has(m[1])) { seen.add(m[1]); anchors.push(m[1]) }
+  }
+  console.log(`[legislatie] Doc URL: ${docUrl} | ${anchors.length} anchori din TOC`)
 
-      for (const link of allLinks) {
-        const href = link.href || ''
-        if (href.includes('DetaliiDocument/') && !href.includes('Afis') && !href.includes(`/${tocId}`)) {
-          result.docUrl = href.split('#')[0]
-          break
-        }
-      }
-
-      for (const link of allLinks) {
-        const href = link.href || ''
-        const hash = href.split('#')[1] || ''
-        if (hash.startsWith('id_art')) {
-          result.anchors.push({ anchor: hash, title: link.textContent?.trim() || '' })
-        }
-      }
-
-      return result
-    }, String(docId))
-
-    const docUrl = tocData.docUrl || `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
-    console.log(`[legislatie] Doc URL: ${docUrl} | ${tocData.anchors.length} anchori gasiti`)
-
-    if (!tocData.anchors.length) {
-      console.log(`[legislatie] Niciun anchor in TOC pentru ${actNormativ}, skip`)
-      return []
-    }
-
-    // Pas 2: incarca documentul o singura data
-    await page.goto(docUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
-    await new Promise(r => setTimeout(r, 8000))
-
-    let nouExtrase = 0
-    let sarite = 0
-
-    // Pas 3: pentru fiecare anchor, navigheaza si extrage — cu delay 1.5s
-    for (let i = 0; i < tocData.anchors.length; i++) {
-      const { anchor, title } = tocData.anchors[i]
-
-      await page.evaluate((hash) => { window.location.hash = hash }, anchor)
-      await new Promise(r => setTimeout(r, 1500))
-
-      const articol = await page.evaluate((anchorId) => {
-        const el = document.getElementById(anchorId)
-        if (!el) return null
-        const text = (el.innerText || '').trim()
-        if (!text || text.length < 10) return null
-        return text
-      }, anchor)
-
-      if (articol) {
-        const artMatch = articol.match(/^(Art\.?\s*[\d]+[a-z]?)\s*[-—.]?\s*([^\n]{0,150})\n?([\s\S]*)/)
-        const nrArticol = artMatch ? artMatch[1].trim() : title
-        const titluArticol = artMatch && artMatch[2].length > 0 && artMatch[2].length < 150 ? artMatch[2].trim() : null
-        const textArticol = artMatch ? artMatch[3].replace(/\s+/g, ' ').trim() : articol.replace(/\s+/g, ' ').trim()
-
-        if (textArticol.length > 5) {
-          // Sare daca articolul e deja in DB
-          if (existingNrs.has(nrArticol)) {
-            sarite++
-          } else {
-            // Salveaza imediat in DB — progresul e pastrat chiar daca se intrerupe
-            if (supabase) {
-              await supabase.from('legislatie_articole').insert({
-                act_normativ: actNormativ,
-                domeniu,
-                nr_articol: nrArticol,
-                titlu_articol: titluArticol,
-                text_articol: textArticol.substring(0, 5000),
-                mo_nr: null,
-                mo_data: null,
-              })
-            }
-            existingNrs.add(nrArticol)
-            nouExtrase++
-          }
-        }
-      }
-
-      if ((i + 1) % 100 === 0) {
-        console.log(`[legislatie] ${actNormativ}: ${i + 1}/${tocData.anchors.length} | noi: ${nouExtrase} | sarite: ${sarite}`)
-      }
-    }
-
-    console.log(`[legislatie] Finalizat ${actNormativ}: ${nouExtrase} articole noi, ${sarite} sarite (existau deja)`)
+  if (!anchors.length) {
+    console.log(`[legislatie] Niciun anchor in TOC pentru ${actNormativ}, skip`)
     return []
-  } finally {
-    await browser.close()
   }
+
+  // Pas 2: fetch documentul complet
+  console.log(`[legislatie] Fetch document HTML: ${actNormativ}`)
+  const docResp = await fetch(docUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(120000) })
+  if (!docResp.ok) throw new Error(`Doc HTTP ${docResp.status}`)
+  const docHtml = await docResp.text()
+  console.log(`[legislatie] HTML primit: ${Math.round(docHtml.length / 1024)} KB`)
+
+  // Verifica daca articolele sunt in HTML (nu AJAX)
+  if (!docHtml.includes(`id="${anchors[0]}"`)) {
+    console.log(`[legislatie] Ancori absenti din HTML — site foloseste AJAX lazy load, skip`)
+    return []
+  }
+
+  // Pas 3: extrage textul fiecarui articol din HTML
+  let nouExtrase = 0
+  let sarite = 0
+
+  for (let i = 0; i < anchors.length; i++) {
+    const anchor = anchors[i]
+    const startIdx = docHtml.indexOf(`id="${anchor}"`)
+    if (startIdx === -1) continue
+
+    const nextIdx = i + 1 < anchors.length
+      ? docHtml.indexOf(`id="${anchors[i + 1]}"`, startIdx + 1)
+      : -1
+    const endIdx = nextIdx !== -1 ? nextIdx : Math.min(startIdx + 8000, docHtml.length)
+
+    const segment = docHtml.substring(startIdx, endIdx)
+    const rawText = segment
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#\d+;/g, ' ')
+      .replace(/\s+/g, ' ').trim()
+
+    if (!rawText || rawText.length < 10) continue
+
+    const artMatch = rawText.match(/^(Art\.?\s*\d+[\^]?[a-z]?)\s*[-—.]?\s*(.{0,150?}?)\s{2,}([\s\S]*)/)
+    const nrArticol = artMatch ? artMatch[1].trim() : anchor
+    const titluArticol = artMatch && artMatch[2] && artMatch[2].length < 150 ? artMatch[2].trim() || null : null
+    const textArticol = (artMatch ? artMatch[3] : rawText).replace(/\s+/g, ' ').trim()
+
+    if (textArticol.length < 5) continue
+
+    if (existingNrs.has(nrArticol)) {
+      sarite++
+    } else {
+      if (supabase) {
+        await supabase.from('legislatie_articole').insert({
+          act_normativ: actNormativ,
+          domeniu,
+          nr_articol: nrArticol,
+          titlu_articol: titluArticol,
+          text_articol: textArticol.substring(0, 5000),
+          mo_nr: null,
+          mo_data: null,
+        })
+      }
+      existingNrs.add(nrArticol)
+      nouExtrase++
+    }
+
+    if ((i + 1) % 100 === 0) {
+      console.log(`[legislatie] ${actNormativ}: ${i + 1}/${anchors.length} | noi: ${nouExtrase} | sarite: ${sarite}`)
+    }
+  }
+
+  console.log(`[legislatie] Finalizat ${actNormativ}: ${nouExtrase} noi, ${sarite} sarite`)
+  return []
 }
 
 // GET /legislatie/status
