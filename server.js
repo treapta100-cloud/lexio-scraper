@@ -970,11 +970,19 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     'Accept-Language': 'ro-RO,ro;q=0.9,en;q=0.8',
   }
 
+  function fetchCuTimeout(url, ms) {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), ms)
+    return fetch(url, { headers: fetchHeaders, signal: ctrl.signal })
+      .finally(() => clearTimeout(timer))
+  }
+
   // Pas 1: fetch TOC → extrage URL document real + toti anchorii
   const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
   console.log(`[legislatie] Fetch TOC: ${actNormativ}`)
-  const tocResp = await fetch(tocUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(30000) })
+  const tocResp = await fetchCuTimeout(tocUrl, 30000)
   if (!tocResp.ok) throw new Error(`TOC HTTP ${tocResp.status}`)
+  console.log(`[legislatie] TOC primit, parsez...`)
   const tocHtml = await tocResp.text()
 
   // Extrage ID-ul real al documentului din link-uri de tip /Public/DetaliiDocument/XXXXX
@@ -997,8 +1005,9 @@ async function scrapeLege(docId, actNormativ, domeniu) {
 
   // Pas 2: fetch documentul complet
   console.log(`[legislatie] Fetch document HTML: ${actNormativ}`)
-  const docResp = await fetch(docUrl, { headers: fetchHeaders, signal: AbortSignal.timeout(120000) })
+  const docResp = await fetchCuTimeout(docUrl, 120000)
   if (!docResp.ok) throw new Error(`Doc HTTP ${docResp.status}`)
+  console.log(`[legislatie] Document primit, parsez...`)
   const docHtml = await docResp.text()
   console.log(`[legislatie] HTML primit: ${Math.round(docHtml.length / 1024)} KB`)
 
