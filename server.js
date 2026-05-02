@@ -954,6 +954,17 @@ const LEGI = [
 ]
 
 async function scrapeLege(docId, actNormativ, domeniu) {
+  // Incarca articolele deja existente in DB pentru resume
+  const existingNrs = new Set()
+  if (supabase) {
+    const { data: existing } = await supabase
+      .from('legislatie_articole')
+      .select('nr_articol')
+      .eq('act_normativ', actNormativ)
+    ;(existing || []).forEach(r => existingNrs.add(r.nr_articol))
+    console.log(`[legislatie] ${actNormativ}: ${existingNrs.size} articole deja in DB, continuam de unde am ramas`)
+  }
+
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
@@ -974,7 +985,6 @@ async function scrapeLege(docId, actNormativ, domeniu) {
       const result = { docUrl: null, anchors: [] }
       const allLinks = Array.from(document.querySelectorAll('a'))
 
-      // Gaseste URL document (ID diferit de TOC = versiune consolidata)
       for (const link of allLinks) {
         const href = link.href || ''
         if (href.includes('DetaliiDocument/') && !href.includes('Afis') && !href.includes(`/${tocId}`)) {
@@ -983,15 +993,11 @@ async function scrapeLege(docId, actNormativ, domeniu) {
         }
       }
 
-      // Extrage toti anchorii articolelor
       for (const link of allLinks) {
         const href = link.href || ''
         const hash = href.split('#')[1] || ''
         if (hash.startsWith('id_art')) {
-          result.anchors.push({
-            anchor: hash,
-            title: link.textContent?.trim() || '',
-          })
+          result.anchors.push({ anchor: hash, title: link.textContent?.trim() || '' })
         }
       }
 
@@ -1010,18 +1016,15 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     await page.goto(docUrl, { waitUntil: 'domcontentloaded', timeout: 120000 })
     await new Promise(r => setTimeout(r, 5000))
 
-    const articole = []
-    const seen = new Set()
+    let nouExtrase = 0
+    let sarite = 0
 
-    // Pas 3: pentru fiecare anchor, navigheaza la el si extrage articolul
+    // Pas 3: pentru fiecare anchor, navigheaza si extrage — cu delay 1.5s
     for (let i = 0; i < tocData.anchors.length; i++) {
       const { anchor, title } = tocData.anchors[i]
 
-      // Schimba hash-ul fara reload complet
-      await page.evaluate((hash) => {
-        window.location.hash = hash
-      }, anchor)
-      await new Promise(r => setTimeout(r, 600))
+      await page.evaluate((hash) => { window.location.hash = hash }, anchor)
+      await new Promise(r => setTimeout(r, 1500))
 
       const articol = await page.evaluate((anchorId) => {
         const el = document.getElementById(anchorId)
@@ -1031,34 +1034,42 @@ async function scrapeLege(docId, actNormativ, domeniu) {
         return text
       }, anchor)
 
-      if (articol && !seen.has(anchor)) {
-        seen.add(anchor)
-        // Parseaza numarul si titlul articolului
+      if (articol) {
         const artMatch = articol.match(/^(Art\.?\s*[\d]+[a-z]?)\s*[-—.]?\s*([^\n]{0,150})\n?([\s\S]*)/)
         const nrArticol = artMatch ? artMatch[1].trim() : title
         const titluArticol = artMatch && artMatch[2].length > 0 && artMatch[2].length < 150 ? artMatch[2].trim() : null
         const textArticol = artMatch ? artMatch[3].replace(/\s+/g, ' ').trim() : articol.replace(/\s+/g, ' ').trim()
 
         if (textArticol.length > 5) {
-          articole.push({
-            act_normativ: actNormativ,
-            domeniu,
-            nr_articol: nrArticol,
-            titlu_articol: titluArticol,
-            text_articol: textArticol.substring(0, 5000),
-            mo_nr: null,
-            mo_data: null,
-          })
+          // Sare daca articolul e deja in DB
+          if (existingNrs.has(nrArticol)) {
+            sarite++
+          } else {
+            // Salveaza imediat in DB — progresul e pastrat chiar daca se intrerupe
+            if (supabase) {
+              await supabase.from('legislatie_articole').insert({
+                act_normativ: actNormativ,
+                domeniu,
+                nr_articol: nrArticol,
+                titlu_articol: titluArticol,
+                text_articol: textArticol.substring(0, 5000),
+                mo_nr: null,
+                mo_data: null,
+              })
+            }
+            existingNrs.add(nrArticol)
+            nouExtrase++
+          }
         }
       }
 
       if ((i + 1) % 100 === 0) {
-        console.log(`[legislatie] ${actNormativ}: ${i + 1}/${tocData.anchors.length} procesate, ${articole.length} extrase`)
+        console.log(`[legislatie] ${actNormativ}: ${i + 1}/${tocData.anchors.length} | noi: ${nouExtrase} | sarite: ${sarite}`)
       }
     }
 
-    console.log(`[legislatie] Gasit ${articole.length} articole pentru ${actNormativ}`)
-    return articole
+    console.log(`[legislatie] Finalizat ${actNormativ}: ${nouExtrase} articole noi, ${sarite} sarite (existau deja)`)
+    return []
   } finally {
     await browser.close()
   }
