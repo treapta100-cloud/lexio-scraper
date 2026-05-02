@@ -1073,6 +1073,27 @@ async function scrapeLege(docId, actNormativ, domeniu) {
   return []
 }
 
+// GET /legislatie/test-fetch — diagnosticare conectivitate
+app.get('/legislatie/test-fetch', async (req, res) => {
+  const url = 'https://legislatie.just.ro/Public/DetaliiDocumentAfis/175630'
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 15000)
+  try {
+    const start = Date.now()
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: ctrl.signal,
+    })
+    clearTimeout(timer)
+    const html = await resp.text()
+    const anchors = [...html.matchAll(/href="[^"]*#(id_art[^"&]+)"/g)].length
+    res.json({ ok: true, status: resp.status, htmlKB: Math.round(html.length / 1024), anchors, ms: Date.now() - start })
+  } catch (e) {
+    clearTimeout(timer)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // GET /legislatie/status
 app.get('/legislatie/status', async (req, res) => {
   if (!supabase) return res.status(503).json({ error: 'Supabase not configured' })
