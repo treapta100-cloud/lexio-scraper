@@ -967,7 +967,7 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     // Pas 1: incarca TOC → extrage URL document + toti anchorii articolelor
     const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
     console.log(`[legislatie] Scrapez TOC: ${actNormativ}`)
-    await page.goto(tocUrl, { waitUntil: 'networkidle2', timeout: 60000 })
+    await page.goto(tocUrl, { waitUntil: 'domcontentloaded', timeout: 120000 })
     await new Promise(r => setTimeout(r, 3000))
 
     const tocData = await page.evaluate((tocId) => {
@@ -1007,7 +1007,7 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     }
 
     // Pas 2: incarca documentul o singura data
-    await page.goto(docUrl, { waitUntil: 'networkidle2', timeout: 90000 })
+    await page.goto(docUrl, { waitUntil: 'domcontentloaded', timeout: 120000 })
     await new Promise(r => setTimeout(r, 5000))
 
     const articole = []
