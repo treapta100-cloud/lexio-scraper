@@ -970,17 +970,29 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     await page.goto(tocUrl, { waitUntil: 'networkidle2', timeout: 60000 })
     await new Promise(r => setTimeout(r, 3000))
 
-    // Gaseste linkul catre documentul cu text complet
-    const docUrl = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a[href*="DetaliiDocument"]'))
+    // Gaseste linkul catre documentul cu text complet (versiune consolidata)
+    const docUrl = await page.evaluate((tocId) => {
+      const links = Array.from(document.querySelectorAll('a'))
+
+      // Prioritate: link cu ID diferit de TOC (versiune consolidata)
       for (const link of links) {
         const href = link.href || ''
-        if (href.includes('DetaliiDocument/') && !href.includes('Afis')) {
+        if (href.includes('DetaliiDocument/') && !href.includes('Afis') && !href.includes(`/${tocId}`)) {
           return href.split('#')[0]
         }
       }
+
+      // Fallback: cauta link cu text "consolidat", "actualizat", "integral"
+      for (const link of links) {
+        const text = (link.textContent || '').toLowerCase()
+        const href = link.href || ''
+        if (href && (text.includes('consolidat') || text.includes('actualizat') || text.includes('integral'))) {
+          return href.split('#')[0]
+        }
+      }
+
       return null
-    })
+    }, String(docId))
 
     const targetUrl = docUrl || `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
     console.log(`[legislatie] URL document: ${targetUrl}`)
