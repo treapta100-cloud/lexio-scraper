@@ -2,6 +2,7 @@ const express = require('express')
 const puppeteer = require('puppeteer-core')
 const http = require('http')
 const rateLimit = require('express-rate-limit')
+const cron = require('node-cron')
 const { createClient } = require('@supabase/supabase-js')
 
 const app = express()
@@ -930,6 +931,272 @@ app.get('/modificari-legislative', async (req, res) => {
     res.status(502).json({ acte: [], error: e.message })
   }
 })
+
+// ─── LEGISLATIE ──────────────────────────────────────────────────────────────
+
+const LEGI = [
+  { id: 175630, act: 'Codul Civil', domeniu: 'Civil' },
+  { id: 175638, act: 'Codul de Procedură Civilă', domeniu: 'Civil' },
+  { id: 164673, act: 'Codul Penal', domeniu: 'Penal' },
+  { id: 164674, act: 'Codul de Procedură Penală', domeniu: 'Penal' },
+  { id: 1513,   act: 'Legea 31/1990', domeniu: 'Comercial' },
+  { id: 10244,  act: 'Legea 26/1990', domeniu: 'Comercial' },
+  { id: 158638, act: 'Legea 85/2014 (Insolvență)', domeniu: 'Insolventa' },
+  { id: 46906,  act: 'Codul Muncii', domeniu: 'Muncii' },
+  { id: 163612, act: 'Codul Fiscal', domeniu: 'Fiscal' },
+  { id: 163607, act: 'Codul de Procedură Fiscală', domeniu: 'Fiscal' },
+]
+
+async function scrapeLege(docId, actNormativ, domeniu) {
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    headless: true,
+  })
+
+  try {
+    const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36')
+
+    const url = `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
+    console.log(`[legislatie] Scrapez: ${actNormativ} → ${url}`)
+
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 90000 })
+    await new Promise(r => setTimeout(r, 4000))
+
+    const articole = await page.evaluate((actNormativ, domeniu) => {
+      const results = []
+      const seen = new Set()
+
+      // Cauta toate elementele care par a fi articole
+      const allEls = document.querySelectorAll('[id], p, div, span')
+
+      allEls.forEach(el => {
+        const text = el.innerText?.trim() || ''
+        if (!text || text.length < 20) return
+
+        // Detecteaza pattern articol: "Art. 123" sau "Articolul 123"
+        const artMatch = text.match(/^(Art\.?\s*\d+[a-z]?|Articolul\s+\d+[a-z]?)\s*[-—.]?\s*(.*)/s)
+        if (!artMatch) return
+
+        const nrArticol = artMatch[1].replace(/\s+/g, ' ').trim()
+        if (seen.has(nrArticol)) return
+        seen.add(nrArticol)
+
+        const restText = artMatch[2].trim()
+        const lines = restText.split('\n').map(l => l.trim()).filter(Boolean)
+
+        // Prima linie dupa nr = titlu (daca e scurta si nu contine punct)
+        let titluArticol = null
+        let textArticol = restText
+
+        if (lines.length > 1 && lines[0].length < 120 && !lines[0].includes('.')) {
+          titluArticol = lines[0]
+          textArticol = lines.slice(1).join(' ').trim()
+        }
+
+        if (!textArticol || textArticol.length < 15) return
+
+        results.push({
+          act_normativ: actNormativ,
+          domeniu,
+          nr_articol: nrArticol,
+          titlu_articol: titluArticol || null,
+          text_articol: textArticol.substring(0, 5000),
+          mo_nr: null,
+          mo_data: null,
+        })
+      })
+
+      return results
+    }, actNormativ, domeniu)
+
+    console.log(`[legislatie] Gasit ${articole.length} articole pentru ${actNormativ}`)
+    return articole
+  } finally {
+    await browser.close()
+  }
+}
+
+// GET /legislatie/status
+app.get('/legislatie/status', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' })
+
+  const { data, error } = await supabase
+    .from('legislatie_articole')
+    .select('act_normativ, domeniu, updated_at')
+
+  if (error) return res.status(500).json({ error: error.message })
+
+  const stats = {}
+  for (const row of (data || [])) {
+    if (!stats[row.act_normativ]) {
+      stats[row.act_normativ] = { count: 0, domeniu: row.domeniu, updated_at: row.updated_at }
+    }
+    stats[row.act_normativ].count++
+    if (row.updated_at > stats[row.act_normativ].updated_at) {
+      stats[row.act_normativ].updated_at = row.updated_at
+    }
+  }
+
+  res.json({ acte: stats, total: data?.length || 0 })
+})
+
+// POST /legislatie/scrape — admin only
+app.post('/legislatie/scrape', async (req, res) => {
+  const adminKey = req.headers['x-admin-key']
+  if (!process.env.ADMIN_KEY || adminKey !== process.env.ADMIN_KEY) {
+    return res.status(403).json({ error: 'Forbidden' })
+  }
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' })
+
+  const { doc_id, act_normativ, domeniu } = req.body
+
+  if (doc_id && act_normativ && domeniu) {
+    res.json({ message: `Scraping pornit pentru ${act_normativ}` })
+
+    scrapeLege(doc_id, act_normativ, domeniu).then(async (articole) => {
+      if (!articole.length) return console.log(`[legislatie] Niciun articol: ${act_normativ}`)
+      await supabase.from('legislatie_articole').delete().eq('act_normativ', act_normativ)
+      for (let i = 0; i < articole.length; i += 500) {
+        await supabase.from('legislatie_articole').insert(articole.slice(i, i + 500))
+      }
+      console.log(`[legislatie] ✓ Salvat ${articole.length} articole: ${act_normativ}`)
+    }).catch(e => console.log(`[legislatie] ✗ Eroare ${act_normativ}:`, e.message))
+    return
+  }
+
+  // Scrape toate legile
+  res.json({ message: 'Scraping toate legile pornit' })
+  scrapeToate()
+})
+
+// POST /legislatie/cauta
+app.post('/legislatie/cauta', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not configured' })
+
+  const { query, domeniu } = req.body
+  if (!query?.trim()) return res.status(400).json({ error: 'Query required' })
+
+  try {
+    let termeni = [query.trim()]
+
+    if (process.env.GROK_API_KEY) {
+      try {
+        const grokResp = await fetch('https://api.x.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.GROK_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: 'grok-3-mini',
+            messages: [
+              {
+                role: 'system',
+                content: 'Ești asistent juridic specializat în drept românesc. La o interogare, returnezi DOAR un JSON array cu 3-5 termeni juridici cheie în română pentru căutare în legislație. Fără explicații.',
+              },
+              {
+                role: 'user',
+                content: `Interogare: "${query}"\nJSON array termeni:`,
+              },
+            ],
+            max_tokens: 100,
+          }),
+        })
+
+        if (grokResp.ok) {
+          const grokData = await grokResp.json()
+          const content = grokData.choices?.[0]?.message?.content?.trim() || ''
+          const match = content.match(/\[[\s\S]*?\]/)
+          if (match) {
+            const parsed = JSON.parse(match[0])
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              termeni = parsed.map(t => String(t).toLowerCase().trim()).filter(Boolean)
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[legislatie/cauta] Grok fallback la query original:', e.message)
+      }
+    }
+
+    console.log(`[legislatie/cauta] "${query}" → [${termeni.join(', ')}]`)
+
+    let dbQuery = supabase
+      .from('legislatie_articole')
+      .select('act_normativ, domeniu, nr_articol, titlu_articol, text_articol, mo_nr, mo_data')
+      .limit(40)
+
+    if (domeniu && domeniu !== 'Toate') {
+      dbQuery = dbQuery.eq('domeniu', domeniu)
+    }
+
+    const orFilter = termeni
+      .slice(0, 4)
+      .flatMap(t => [
+        `text_articol.ilike.%${t}%`,
+        `titlu_articol.ilike.%${t}%`,
+        `nr_articol.ilike.%${t}%`,
+      ])
+      .join(',')
+
+    const { data, error } = await dbQuery.or(orFilter)
+
+    if (error) {
+      console.log('[legislatie/cauta] Supabase eroare:', error.message)
+      return res.status(500).json({ error: error.message })
+    }
+
+    // Grupeaza pe act normativ
+    const grouped = {}
+    for (const art of (data || [])) {
+      if (!grouped[art.act_normativ]) {
+        grouped[art.act_normativ] = { act_normativ: art.act_normativ, domeniu: art.domeniu, articole: [] }
+      }
+      grouped[art.act_normativ].articole.push({
+        nr: art.nr_articol,
+        titlu: art.titlu_articol,
+        text: art.text_articol,
+        moNr: art.mo_nr,
+        moData: art.mo_data,
+      })
+    }
+
+    const rezultate = Object.values(grouped)
+    console.log(`[legislatie/cauta] ${data?.length || 0} articole din ${rezultate.length} acte`)
+
+    res.json({ rezultate, termeni })
+  } catch (e) {
+    console.log('[legislatie/cauta] Eroare:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+async function scrapeToate() {
+  if (!supabase) return console.log('[cron] Supabase not configured, skip')
+  console.log('[cron] Start scraping toate legile...')
+  for (const lege of LEGI) {
+    try {
+      const articole = await scrapeLege(lege.id, lege.act, lege.domeniu)
+      if (!articole.length) { console.log(`[cron] ✗ 0 articole: ${lege.act}`); continue }
+      await supabase.from('legislatie_articole').delete().eq('act_normativ', lege.act)
+      for (let i = 0; i < articole.length; i += 500) {
+        await supabase.from('legislatie_articole').insert(articole.slice(i, i + 500))
+      }
+      console.log(`[cron] ✓ ${lege.act}: ${articole.length} articole`)
+    } catch (e) {
+      console.log(`[cron] ✗ ${lege.act}:`, e.message)
+    }
+  }
+  console.log('[cron] Scraping finalizat.')
+}
+
+// Cron: in fiecare duminica la 03:00
+cron.schedule('0 3 * * 0', () => {
+  console.log('[cron] Pornit scraping saptamanal legislatie...')
+  scrapeToate()
+}, { timezone: 'Europe/Bucharest' })
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
