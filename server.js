@@ -17,6 +17,10 @@ const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
   : null
 
 async function requireAuth(req, res, next) {
+  // Admin key — permite accesul la rutele admin fara JWT
+  const adminKey = req.headers['x-admin-key']
+  if (process.env.ADMIN_KEY && adminKey === process.env.ADMIN_KEY) return next()
+
   // Metoda 1 (legacy): API key static
   const apiKey = req.headers['x-api-key']
   if (API_KEY && apiKey === API_KEY) return next()
