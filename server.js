@@ -964,86 +964,98 @@ async function scrapeLege(docId, actNormativ, domeniu) {
     const page = await browser.newPage()
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36')
 
-    // Pas 1: incarca TOC ca sa gasim ID-ul documentului randat
+    // Pas 1: incarca TOC → extrage URL document + toti anchorii articolelor
     const tocUrl = `https://legislatie.just.ro/Public/DetaliiDocumentAfis/${docId}`
     console.log(`[legislatie] Scrapez TOC: ${actNormativ}`)
     await page.goto(tocUrl, { waitUntil: 'networkidle2', timeout: 60000 })
     await new Promise(r => setTimeout(r, 3000))
 
-    // Gaseste linkul catre documentul cu text complet (versiune consolidata)
-    const docUrl = await page.evaluate((tocId) => {
-      const links = Array.from(document.querySelectorAll('a'))
+    const tocData = await page.evaluate((tocId) => {
+      const result = { docUrl: null, anchors: [] }
+      const allLinks = Array.from(document.querySelectorAll('a'))
 
-      // Prioritate: link cu ID diferit de TOC (versiune consolidata)
-      for (const link of links) {
+      // Gaseste URL document (ID diferit de TOC = versiune consolidata)
+      for (const link of allLinks) {
         const href = link.href || ''
         if (href.includes('DetaliiDocument/') && !href.includes('Afis') && !href.includes(`/${tocId}`)) {
-          return href.split('#')[0]
+          result.docUrl = href.split('#')[0]
+          break
         }
       }
 
-      // Fallback: cauta link cu text "consolidat", "actualizat", "integral"
-      for (const link of links) {
-        const text = (link.textContent || '').toLowerCase()
+      // Extrage toti anchorii articolelor
+      for (const link of allLinks) {
         const href = link.href || ''
-        if (href && (text.includes('consolidat') || text.includes('actualizat') || text.includes('integral'))) {
-          return href.split('#')[0]
+        const hash = href.split('#')[1] || ''
+        if (hash.startsWith('id_art')) {
+          result.anchors.push({
+            anchor: hash,
+            title: link.textContent?.trim() || '',
+          })
         }
       }
 
-      return null
+      return result
     }, String(docId))
 
-    const targetUrl = docUrl || `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
-    console.log(`[legislatie] URL document: ${targetUrl}`)
+    const docUrl = tocData.docUrl || `https://legislatie.just.ro/Public/DetaliiDocument/${docId}`
+    console.log(`[legislatie] Doc URL: ${docUrl} | ${tocData.anchors.length} anchori gasiti`)
 
-    // Pas 2: incarca documentul cu text complet
-    await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 90000 })
-    await new Promise(r => setTimeout(r, 6000))
-
-    // Scroll progresiv pentru lazy loading
-    const scrollSteps = 10
-    for (let i = 1; i <= scrollSteps; i++) {
-      await page.evaluate((step, total) => {
-        window.scrollTo(0, (document.body.scrollHeight / total) * step)
-      }, i, scrollSteps)
-      await new Promise(r => setTimeout(r, 800))
+    if (!tocData.anchors.length) {
+      console.log(`[legislatie] Niciun anchor in TOC pentru ${actNormativ}, skip`)
+      return []
     }
-    await new Promise(r => setTimeout(r, 3000))
 
-    // Pas 3: extrage text complet si parseaza articolele
-    const articole = await page.evaluate((actNormativ, domeniu) => {
-      const results = []
-      const seen = new Set()
-      const bodyText = (document.body.innerText || '').replace(/\r\n/g, '\n')
+    // Pas 2: incarca documentul o singura data
+    await page.goto(docUrl, { waitUntil: 'networkidle2', timeout: 90000 })
+    await new Promise(r => setTimeout(r, 5000))
 
-      // Pattern robust pentru articole romanesti
-      const artRegex = /\b(Art(?:icolul)?\.?\s*\d+[¹²³⁰-⁹]*[a-z]?)\s*[-—.]?\s*([^\n]{0,150})\n([\s\S]{10,2000}?)(?=\n\s*\bArt(?:icolul)?\.?\s*\d+|\n\s*TITLUL|\n\s*CAPITOLUL|\n\s*SECTIUNEA|$)/gi
+    const articole = []
+    const seen = new Set()
 
-      let match
-      while ((match = artRegex.exec(bodyText)) !== null) {
-        const nrArticol = match[1].replace(/\s+/g, ' ').trim()
-        if (seen.has(nrArticol)) continue
-        seen.add(nrArticol)
+    // Pas 3: pentru fiecare anchor, navigheaza la el si extrage articolul
+    for (let i = 0; i < tocData.anchors.length; i++) {
+      const { anchor, title } = tocData.anchors[i]
 
-        const titluRaw = match[2].trim()
-        const textRaw = match[3].replace(/\s+/g, ' ').trim()
+      // Schimba hash-ul fara reload complet
+      await page.evaluate((hash) => {
+        window.location.hash = hash
+      }, anchor)
+      await new Promise(r => setTimeout(r, 600))
 
-        if (textRaw.length < 10) continue
+      const articol = await page.evaluate((anchorId) => {
+        const el = document.getElementById(anchorId)
+        if (!el) return null
+        const text = (el.innerText || '').trim()
+        if (!text || text.length < 10) return null
+        return text
+      }, anchor)
 
-        results.push({
-          act_normativ: actNormativ,
-          domeniu,
-          nr_articol: nrArticol,
-          titlu_articol: titluRaw.length > 0 && titluRaw.length < 150 ? titluRaw : null,
-          text_articol: textRaw.substring(0, 5000),
-          mo_nr: null,
-          mo_data: null,
-        })
+      if (articol && !seen.has(anchor)) {
+        seen.add(anchor)
+        // Parseaza numarul si titlul articolului
+        const artMatch = articol.match(/^(Art\.?\s*[\d]+[a-z]?)\s*[-—.]?\s*([^\n]{0,150})\n?([\s\S]*)/)
+        const nrArticol = artMatch ? artMatch[1].trim() : title
+        const titluArticol = artMatch && artMatch[2].length > 0 && artMatch[2].length < 150 ? artMatch[2].trim() : null
+        const textArticol = artMatch ? artMatch[3].replace(/\s+/g, ' ').trim() : articol.replace(/\s+/g, ' ').trim()
+
+        if (textArticol.length > 5) {
+          articole.push({
+            act_normativ: actNormativ,
+            domeniu,
+            nr_articol: nrArticol,
+            titlu_articol: titluArticol,
+            text_articol: textArticol.substring(0, 5000),
+            mo_nr: null,
+            mo_data: null,
+          })
+        }
       }
 
-      return results
-    }, actNormativ, domeniu)
+      if ((i + 1) % 100 === 0) {
+        console.log(`[legislatie] ${actNormativ}: ${i + 1}/${tocData.anchors.length} procesate, ${articole.length} extrase`)
+      }
+    }
 
     console.log(`[legislatie] Gasit ${articole.length} articole pentru ${actNormativ}`)
     return articole
