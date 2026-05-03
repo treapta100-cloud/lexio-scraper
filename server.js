@@ -1098,24 +1098,31 @@ app.get('/legislatie/test-fetch', async (req, res) => {
 app.get('/legislatie/status', async (req, res) => {
   if (!supabase) return res.status(503).json({ error: 'Supabase not configured' })
 
-  const { data, error } = await supabase
-    .from('legislatie_articole')
-    .select('act_normativ, domeniu, updated_at')
-
-  if (error) return res.status(500).json({ error: error.message })
+  const LEGI_NAMES = [
+    'Codul Civil', 'Codul de Procedura Civila', 'Codul Penal',
+    'Codul de Procedura Penala', 'Legea 31/1990', 'Legea 26/1990',
+    'Legea 85/2014 (Insolventa)', 'Codul Muncii', 'Codul Fiscal',
+    'Codul de Procedura Fiscala',
+  ]
 
   const stats = {}
-  for (const row of (data || [])) {
-    if (!stats[row.act_normativ]) {
-      stats[row.act_normativ] = { count: 0, domeniu: row.domeniu, updated_at: row.updated_at }
-    }
-    stats[row.act_normativ].count++
-    if (row.updated_at > stats[row.act_normativ].updated_at) {
-      stats[row.act_normativ].updated_at = row.updated_at
-    }
+  let total = 0
+  for (const act of LEGI_NAMES) {
+    const { count, error: e } = await supabase
+      .from('legislatie_articole')
+      .select('*', { count: 'exact', head: true })
+      .eq('act_normativ', act)
+    if (e || !count) continue
+    const { data: sample } = await supabase
+      .from('legislatie_articole')
+      .select('domeniu, updated_at')
+      .eq('act_normativ', act)
+      .limit(1)
+    stats[act] = { count, domeniu: sample?.[0]?.domeniu || '', updated_at: sample?.[0]?.updated_at || '' }
+    total += count
   }
 
-  res.json({ acte: stats, total: data?.length || 0 })
+  res.json({ acte: stats, total })
 })
 
 // POST /legislatie/scrape — admin only
