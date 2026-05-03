@@ -1275,11 +1275,8 @@ async function scrapeToate() {
   console.log('[cron] Scraping finalizat.')
 }
 
-// Cron: in fiecare duminica la 03:00
-cron.schedule('0 3 * * 0', () => {
-  console.log('[cron] Pornit scraping saptamanal legislatie...')
-  scrapeToate()
-}, { timezone: 'Europe/Bucharest' })
+// Cron dezactivat — scraping manual prin scrape-pdf.js
+// cron.schedule('0 3 * * 0', () => { scrapeToate() }, { timezone: 'Europe/Bucharest' })
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
