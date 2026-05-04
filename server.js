@@ -1206,25 +1206,10 @@ app.post('/legislatie/cauta', async (req, res) => {
 
     console.log(`[legislatie/cauta] "${query}" → [${termeni.join(', ')}]`)
 
-    let dbQuery = supabase
-      .from('legislatie_articole')
-      .select('act_normativ, domeniu, nr_articol, titlu_articol, text_articol, mo_nr, mo_data')
-      .limit(40)
-
-    if (domeniu && domeniu !== 'Toate') {
-      dbQuery = dbQuery.eq('domeniu', domeniu)
-    }
-
-    const orFilter = termeni
-      .slice(0, 4)
-      .flatMap(t => [
-        `text_articol.ilike.%${t}%`,
-        `titlu_articol.ilike.%${t}%`,
-        `nr_articol.ilike.%${t}%`,
-      ])
-      .join(',')
-
-    const { data, error } = await dbQuery.or(orFilter)
+    const { data, error } = await supabase.rpc('cauta_legislatie', {
+      p_termeni: termeni.slice(0, 4),
+      p_domeniu: domeniu || 'Toate',
+    })
 
     if (error) {
       console.log('[legislatie/cauta] Supabase eroare:', error.message)
