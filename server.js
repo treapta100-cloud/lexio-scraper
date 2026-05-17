@@ -59,7 +59,7 @@ async function requireAuth(req, res, next) {
     if (!error && user) {
       const sub = await checkSubscription(user.id, token)
       if (!sub) return res.status(401).json({ error: 'Unauthorized' })
-      if (sub.trial_expired && sub.plan !== 'pro' && sub.plan !== 'enterprise') {
+      if (sub.status === 'inactive') {
         return res.status(403).json({ error: 'Subscription required', code: 'SUBSCRIPTION_EXPIRED' })
       }
       req.user = user
