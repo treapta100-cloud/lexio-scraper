@@ -749,6 +749,58 @@ async function getDosarePortal(numeParte) {
   return rezultate
 }
 
+async function getBpiData(denumire) {
+  try {
+    const q = encodeURIComponent(denumire.trim())
+    const resp = await fetch(
+      `https://www.buletinulinsolventei.ro/pt/searches?search[term]=${q}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'ro-RO,ro;q=0.9',
+        },
+        signal: AbortSignal.timeout(10000),
+      }
+    )
+    if (!resp.ok) return null
+    const html = await resp.text()
+
+    const proceduri = []
+    const searchWord = denumire.split(' ')[0].toUpperCase()
+
+    // Extrage randuri din tabel BPI
+    const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi
+    let m
+    while ((m = trRegex.exec(html)) !== null) {
+      const row = m[1]
+      const tds = []
+      const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi
+      let td
+      while ((td = tdRegex.exec(row)) !== null) {
+        const text = td[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+        if (text) tds.push(text)
+      }
+      if (tds.length >= 2 && tds[0].toUpperCase().includes(searchWord)) {
+        proceduri.push({
+          debitor:  tds[0] || null,
+          nr_dosar: tds[1] || null,
+          data:     tds[2] || null,
+          tip:      tds[3] || null,
+          tribunal: tds[4] || null,
+        })
+        if (proceduri.length >= 5) break
+      }
+    }
+
+    console.log(`[bpi] "${denumire}" → ${proceduri.length} proceduri`)
+    return { gasit: proceduri.length > 0, nr_proceduri: proceduri.length, proceduri }
+  } catch (err) {
+    console.log('[bpi] Eroare:', err.message)
+    return null
+  }
+}
+
 app.post('/due-diligence', async (req, res) => {
   const { cui, denumire } = req.body || {}
   if (!cui && !denumire) {
@@ -764,23 +816,26 @@ app.post('/due-diligence', async (req, res) => {
     try { anaf = await getAnafData(cui); anafOk = true } catch (_) {}
   }
 
-  // Pas 2 — portal + openapi in paralel, folosind denumirea din ANAF daca nu e furnizata
+  // Pas 2 — portal + openapi + BPI in paralel
   const numePentruPortal = denumire || anaf?.denumire || ''
-  console.log(`[due-diligence] Cautare portal cu: "${numePentruPortal}"`)
+  console.log(`[due-diligence] Cautare cu: "${numePentruPortal}"`)
 
-  const [openapiResult, dosareResult] = await Promise.allSettled([
+  const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
     numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve([]),
+    numePentruPortal ? getBpiData(numePentruPortal) : Promise.resolve(null),
   ])
 
   res.json({
     anaf,
     openapi: openapiResult.status === 'fulfilled' ? openapiResult.value : null,
     dosare_portal: dosareResult.status === 'fulfilled' ? dosareResult.value : [],
+    bpi: bpiResult.status === 'fulfilled' ? bpiResult.value : null,
     surse: {
       anaf: anafOk,
       openapi: openapiResult.status === 'fulfilled' && openapiResult.value !== null,
       portal: dosareResult.status === 'fulfilled',
+      bpi: bpiResult.status === 'fulfilled' && bpiResult.value !== null,
     },
   })
 })
