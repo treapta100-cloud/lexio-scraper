@@ -17,8 +17,31 @@ const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null
 
+// Cache abonament: evita query Supabase la fiecare request (TTL 60s)
+const subscriptionCache = new Map()
+const CACHE_TTL = 60 * 1000
+
+function supabaseForUser(token) {
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { persistSession: false },
+  })
+}
+
+async function checkSubscription(userId, token) {
+  const cached = subscriptionCache.get(userId)
+  if (cached && Date.now() < cached.expiresAt) return cached.status
+
+  const sb = supabaseForUser(token)
+  const { data, error } = await sb.rpc('get_subscription_status')
+  if (error || !data) return null
+
+  subscriptionCache.set(userId, { status: data, expiresAt: Date.now() + CACHE_TTL })
+  return data
+}
+
 async function requireAuth(req, res, next) {
-  // Admin key — permite accesul la rutele admin fara JWT
+  // Admin key — bypass complet
   const adminKey = req.headers['x-admin-key']
   if (process.env.ADMIN_KEY && adminKey === process.env.ADMIN_KEY) return next()
 
@@ -26,13 +49,19 @@ async function requireAuth(req, res, next) {
   const apiKey = req.headers['x-api-key']
   if (API_KEY && apiKey === API_KEY) return next()
 
-  // Metoda 2 (noua): Supabase JWT
+  // Metoda 2: Supabase JWT + verificare abonament
   const authHeader = req.headers['authorization']
   if (authHeader?.startsWith('Bearer ') && supabase) {
     const token = authHeader.slice(7)
     const { data: { user }, error } = await supabase.auth.getUser(token)
     if (!error && user) {
+      const sub = await checkSubscription(user.id, token)
+      if (!sub) return res.status(401).json({ error: 'Unauthorized' })
+      if (sub.trial_expired && sub.plan !== 'pro' && sub.plan !== 'enterprise') {
+        return res.status(403).json({ error: 'Subscription required', code: 'SUBSCRIPTION_EXPIRED' })
+      }
       req.user = user
+      req.subscription = sub
       return next()
     }
   }
