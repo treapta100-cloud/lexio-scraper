@@ -749,52 +749,72 @@ async function getDosarePortal(numeParte) {
   return rezultate
 }
 
-async function getBpiData(denumire) {
+async function getBpiData(denumire, cui = null) {
   try {
     const q = encodeURIComponent(denumire.trim())
     const resp = await fetch(
-      `https://www.buletinulinsolventei.ro/pt/searches?search[term]=${q}`,
+      `https://www.datebpi.ro/cautare?q=${q}`,
       {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'ro-RO,ro;q=0.9',
+          'Referer': 'https://www.datebpi.ro/',
         },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(12000),
       }
     )
     if (!resp.ok) return null
     const html = await resp.text()
 
-    const proceduri = []
-    const searchWord = denumire.split(' ')[0].toUpperCase()
-
-    // Extrage randuri din tabel BPI
-    const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi
-    let m
-    while ((m = trRegex.exec(html)) !== null) {
-      const row = m[1]
-      const tds = []
-      const tdRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi
-      let td
-      while ((td = tdRegex.exec(row)) !== null) {
-        const text = td[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
-        if (text) tds.push(text)
-      }
-      if (tds.length >= 2 && tds[0].toUpperCase().includes(searchWord)) {
-        proceduri.push({
-          debitor:  tds[0] || null,
-          nr_dosar: tds[1] || null,
-          data:     tds[2] || null,
-          tip:      tds[3] || null,
-          tribunal: tds[4] || null,
-        })
-        if (proceduri.length >= 5) break
-      }
+    // Semn explicit de "no results"
+    if (/nu [ae]xist[aă]|nu s-au g[aă]sit|0 rezultate|no results/i.test(html) && !html.includes('CUI')) {
+      return { gasit: false, nr_proceduri: 0, proceduri: [] }
     }
 
-    console.log(`[bpi] "${denumire}" → ${proceduri.length} proceduri`)
-    return { gasit: proceduri.length > 0, nr_proceduri: proceduri.length, proceduri }
+    const firme = []
+    const searchWords = denumire.toUpperCase().split(/\s+/).filter(w => w.length > 2)
+
+    // Fiecare card are "CUI:" ca marcaj fiabil — le folosim ca separatori
+    const cuiRegex = /CUI:\s*(\d+)/gi
+    const cuiMatches = []
+    let cm
+    while ((cm = cuiRegex.exec(html)) !== null) {
+      cuiMatches.push({ index: cm.index, cui: cm[1] })
+    }
+
+    for (let i = 0; i < cuiMatches.length; i++) {
+      const cardStart = i === 0 ? 0 : cuiMatches[i - 1].index
+      const cardEnd   = cuiMatches[i + 1]?.index ?? html.length
+      const card      = html.slice(cardStart, cardEnd)
+
+      const cuiCard = cuiMatches[i].cui
+
+      // Numele firmei — text cu litere mari (capital Romanian), inainte de CUI in card
+      const nameMatch = card.match(/>\s*([A-ZĂÎÂȘȚ][A-ZĂÎÂȘȚ0-9\s\-\.&'']+(?:SRL|SA|RA|SNC|SCS|SNP|SNA|PFA|II|IF|NV|SC)?)\s*</)
+      const debitor = nameMatch ? nameMatch[1].replace(/\s+/g, ' ').trim() : null
+
+      // Filtru: trebuie sa corespunda cautarii sau CUI-ului
+      const nameUpper = (debitor || '').toUpperCase()
+      const matchesName = searchWords.some(w => nameUpper.includes(w))
+      const matchesCui  = cui && cuiCard === String(cui)
+      if (!matchesName && !matchesCui) continue
+
+      // Status: Activa / Radiata
+      const statusMatch = card.match(/\b(Activ[aă]|Radiat[aă])\b/i)
+      const status = statusMatch ? statusMatch[1] : null
+
+      // Judet
+      const judete = ['Alba','Arad','Argeș','Bacău','Bihor','Bistrița','Botoșani','Brăila','Brașov','București','Buzău','Călărași','Cluj','Constanța','Covasna','Dâmbovița','Dolj','Galați','Giurgiu','Gorj','Harghita','Hunedoara','Ialomița','Iași','Ilfov','Maramureș','Mehedinți','Mureș','Neamț','Olt','Prahova','Sălaj','Satu Mare','Sibiu','Suceava','Teleorman','Timiș','Tulcea','Vâlcea','Vaslui','Vrancea']
+      const judet = judete.find(j => card.includes(j)) || null
+
+      firme.push({ debitor, cui: cuiCard, judet, status })
+      if (firme.length >= 5) break
+    }
+
+    // Daca nu am gasit cu filtrul de matching, inseamna ca firma nu apare in BPI
+    console.log(`[bpi] "${denumire}" → ${firme.length} firme`)
+    return { gasit: firme.length > 0, nr_proceduri: firme.length, proceduri: firme }
   } catch (err) {
     console.log('[bpi] Eroare:', err.message)
     return null
@@ -823,7 +843,7 @@ app.post('/due-diligence', async (req, res) => {
   const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
     numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve([]),
-    numePentruPortal ? getBpiData(numePentruPortal) : Promise.resolve(null),
+    numePentruPortal ? getBpiData(numePentruPortal, cui || null) : Promise.resolve(null),
   ])
 
   res.json({
