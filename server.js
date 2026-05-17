@@ -4,6 +4,7 @@ const http = require('http')
 const rateLimit = require('express-rate-limit')
 const cron = require('node-cron')
 const { createClient } = require('@supabase/supabase-js')
+const ws = require('ws')
 
 const app = express()
 app.set('trust proxy', 1)
@@ -14,7 +15,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
 
 const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { realtime: { transport: ws } })
   : null
 
 // Cache abonament: evita query Supabase la fiecare request (TTL 60s)
@@ -25,6 +26,7 @@ function supabaseForUser(token) {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false },
+    realtime: { transport: ws },
   })
 }
 
