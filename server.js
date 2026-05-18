@@ -751,6 +751,47 @@ async function getDosarePortal(numeParte) {
   return rezultate
 }
 
+app.post('/grok-terms', async (req, res) => {
+  const { query } = req.body || {}
+  if (!query || typeof query !== 'string' || !query.trim()) {
+    return res.status(400).json({ error: 'query lipsa' })
+  }
+
+  const grokKey = process.env.GROK_API_KEY
+  if (!grokKey) return res.json({ termeni: [query.trim()] })
+
+  try {
+    const resp = await fetch('https://api.x.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${grokKey}` },
+      body: JSON.stringify({
+        model: 'grok-3-mini',
+        messages: [
+          { role: 'system', content: 'Ești asistent juridic specializat în drept românesc. La o interogare, returnezi DOAR un JSON array cu 3-5 termeni juridici cheie în română pentru căutare în legislație. Fără explicații.' },
+          { role: 'user', content: `Interogare: "${query.trim()}"\nJSON array termeni:` },
+        ],
+        max_tokens: 100,
+      }),
+      signal: AbortSignal.timeout(8000),
+    })
+
+    if (!resp.ok) return res.json({ termeni: [query.trim()] })
+
+    const data = await resp.json()
+    const content = data.choices?.[0]?.message?.content?.trim() || ''
+    const match = content.match(/\[[\s\S]*?\]/)
+    if (match) {
+      const parsed = JSON.parse(match[0])
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const termeni = parsed.map(t => String(t).toLowerCase().trim()).filter(Boolean)
+        return res.json({ termeni })
+      }
+    }
+  } catch (_) {}
+
+  res.json({ termeni: [query.trim()] })
+})
+
 const BROWSER_HEADERS_CUISCAN = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
