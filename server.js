@@ -751,6 +751,38 @@ async function getDosarePortal(numeParte) {
   return rezultate
 }
 
+const BROWSER_HEADERS_CUISCAN = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'ro-RO,ro;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Referer': 'https://cuiscan.ro/',
+  'Connection': 'keep-alive',
+}
+
+async function getBpiData(cui) {
+  const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
+  const delay = 400 + Math.floor(Math.random() * 400)
+  await new Promise(r => setTimeout(r, delay))
+  try {
+    const resp = await fetch(`https://cuiscan.ro/api.php?action=insolventa&cui=${cuiCurat}`, {
+      headers: BROWSER_HEADERS_CUISCAN,
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!resp.ok) return null
+    const json = await resp.json()
+    if (json.error) return null
+    const proceduri = json.proceduri || []
+    const inFaliment = proceduri.some(p => {
+      const tip = (p.tip || p.stadiu || p.descriere || '').toLowerCase()
+      return tip.includes('faliment') || tip.includes('lichidare')
+    })
+    return { inInsolventa: json.inInsolventa === true, inFaliment }
+  } catch (_) {
+    return null
+  }
+}
+
 app.post('/due-diligence', async (req, res) => {
   const { cui, denumire } = req.body || {}
   if (!cui && !denumire) {
@@ -770,19 +802,22 @@ app.post('/due-diligence', async (req, res) => {
   const numePentruPortal = denumire || anaf?.denumire || ''
   console.log(`[due-diligence] Cautare cu: "${numePentruPortal}"`)
 
-  const [openapiResult, dosareResult] = await Promise.allSettled([
+  const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
     numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve([]),
+    cui ? getBpiData(cui) : Promise.resolve(null),
   ])
 
   res.json({
     anaf,
     openapi: openapiResult.status === 'fulfilled' ? openapiResult.value : null,
     dosare_portal: dosareResult.status === 'fulfilled' ? dosareResult.value : [],
+    bpi: bpiResult.status === 'fulfilled' ? bpiResult.value : null,
     surse: {
       anaf: anafOk,
       openapi: openapiResult.status === 'fulfilled' && openapiResult.value !== null,
       portal: dosareResult.status === 'fulfilled',
+      bpi: bpiResult.status === 'fulfilled' && bpiResult.value !== null,
     },
   })
 })
