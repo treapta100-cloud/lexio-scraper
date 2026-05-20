@@ -10,7 +10,6 @@ const app = express()
 app.set('trust proxy', 1)
 app.use(express.json({ limit: '10mb' }))
 
-const API_KEY = process.env.SCRAPER_API_KEY
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
 
@@ -55,11 +54,7 @@ async function requireAuth(req, res, next) {
   const adminKey = req.headers['x-admin-key']
   if (process.env.ADMIN_KEY && adminKey === process.env.ADMIN_KEY) return next()
 
-  // Metoda 1 (legacy): API key static
-  const apiKey = req.headers['x-api-key']
-  if (API_KEY && apiKey === API_KEY) return next()
-
-  // Metoda 2: Supabase JWT + verificare abonament
+  // Supabase JWT + verificare abonament
   const authHeader = req.headers['authorization']
   if (authHeader?.startsWith('Bearer ') && supabase) {
     const token = authHeader.slice(7)
@@ -485,7 +480,7 @@ async function soapGetDosar(numarDosar) {
 }
 
 app.post('/sync-soap', async (req, res) => {
-  const dosare = req.body?.dosare
+  const dosare = (req.body?.dosare || []).slice(0, 100)
   if (!Array.isArray(dosare) || dosare.length === 0) return res.json({ rezultate: [] })
 
   console.log(`[soap] Sync pentru ${dosare.length} dosare`)
