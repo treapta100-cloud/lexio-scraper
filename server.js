@@ -480,7 +480,7 @@ async function soapGetDosar(numarDosar) {
 }
 
 app.post('/sync-soap', async (req, res) => {
-  const dosare = (req.body?.dosare || []).slice(0, 100)
+  const dosare = (req.body?.dosare || []).slice(0, 500)
   if (!Array.isArray(dosare) || dosare.length === 0) return res.json({ rezultate: [] })
 
   console.log(`[soap] Sync pentru ${dosare.length} dosare`)
