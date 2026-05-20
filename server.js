@@ -18,6 +18,14 @@ const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { realtime: { transport: ws } })
   : null
 
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      realtime: { transport: ws },
+    })
+  : null
+
 // Cache abonament: evita query Supabase la fiecare request (TTL 60s)
 const subscriptionCache = new Map()
 const CACHE_TTL = 60 * 1000
@@ -82,6 +90,44 @@ const limiter = rateLimit({
 })
 
 app.use(limiter)
+
+// RevenueCat webhook — fara requireAuth (RevenueCat nu trimite JWT de user)
+app.post('/revenuecat-webhook', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Admin client not configured' })
+
+  const rcSecret = process.env.REVENUECAT_WEBHOOK_SECRET
+  if (rcSecret && req.headers['authorization'] !== rcSecret) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const event = req.body?.event
+  if (!event) return res.status(400).json({ error: 'No event' })
+
+  const userId = event.original_app_user_id || event.app_user_id
+  if (!userId) return res.status(400).json({ error: 'No user ID' })
+
+  const activeTypes = ['INITIAL_PURCHASE', 'RENEWAL', 'PRODUCT_CHANGE', 'UNCANCELLATION']
+  const cancelTypes = ['CANCELLATION', 'EXPIRATION', 'BILLING_ISSUE']
+
+  try {
+    if (activeTypes.includes(event.type)) {
+      await supabaseAdmin.from('profiles').update({ subscription_plan: 'pro', subscription_status: 'active' }).eq('id', userId)
+      subscriptionCache.delete(userId)
+      console.log(`[rc-webhook] ${event.type} → pro/active pentru ${userId}`)
+    } else if (cancelTypes.includes(event.type)) {
+      await supabaseAdmin.from('profiles').update({ subscription_plan: 'free', subscription_status: 'inactive' }).eq('id', userId)
+      subscriptionCache.delete(userId)
+      console.log(`[rc-webhook] ${event.type} → free/inactive pentru ${userId}`)
+    } else {
+      console.log(`[rc-webhook] Event ignorat: ${event.type}`)
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[rc-webhook] Eroare:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
