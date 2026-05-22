@@ -479,7 +479,17 @@ async function soapGetDosar(numarDosar) {
   return { sedinte, parti }
 }
 
+const lastSyncPerUser = new Map()
+const SYNC_COOLDOWN_MS = 60 * 60 * 1000 // 1 ora
+
 app.post('/sync-soap', async (req, res) => {
+  const userId = req.user?.id
+  if (userId) {
+    const last = lastSyncPerUser.get(userId) || 0
+    if (Date.now() - last < SYNC_COOLDOWN_MS) return res.json({ rezultate: [] })
+    lastSyncPerUser.set(userId, Date.now())
+  }
+
   const dosare = (req.body?.dosare || []).slice(0, 500)
   if (!Array.isArray(dosare) || dosare.length === 0) return res.json({ rezultate: [] })
 
