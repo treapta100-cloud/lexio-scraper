@@ -1421,5 +1421,16 @@ async function scrapeToate() {
 // Cron dezactivat — scraping manual prin scrape-pdf.js
 // cron.schedule('0 3 * * 0', () => { scrapeToate() }, { timezone: 'Europe/Bucharest' })
 
+// Keep-alive: ping Supabase luni + joi la 09:00 pentru a preveni pauza free tier
+cron.schedule('0 9 * * 1,4', async () => {
+  if (!supabase) return
+  try {
+    await supabase.from('profiles').select('id').limit(1)
+    console.log('[keep-alive] Supabase ping OK')
+  } catch (e) {
+    console.log('[keep-alive] Supabase ping eroare:', e.message)
+  }
+}, { timezone: 'Europe/Bucharest' })
+
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`Lexio scraper pornit pe portul ${PORT}`))
