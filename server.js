@@ -123,6 +123,59 @@ app.post('/revenuecat-webhook', async (req, res) => {
   }
 })
 
+// Verificare server-side a abonamentului direct cu RevenueCat REST API.
+// Necesar pe iOS: cand achizitia vine prin TRANSFER/alias (anonim->identificat),
+// RevenueCat NU trimite webhook -> Supabase ramane 'free'. App-ul iOS cheama acest
+// endpoint dupa achizitie si la pornire ca sa sincronizeze profilul.
+// IMPORTANT: definit INAINTE de app.use(requireAuth) — altfel gate-ul 403
+// SUBSCRIPTION_EXPIRED ar bloca exact userii care au nevoie de verificare.
+app.post('/verify-subscription', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Admin client not configured' })
+  const rcSecret = process.env.REVENUECAT_SECRET_KEY
+  if (!rcSecret) return res.status(503).json({ error: 'RevenueCat not configured' })
+
+  const authHeader = req.headers['authorization']
+  if (!authHeader?.startsWith('Bearer ') || !supabase) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  const token = authHeader.slice(7)
+  const { data: { user }, error: authErr } = await supabase.auth.getUser(token)
+  if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' })
+
+  try {
+    const rcRes = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(user.id)}`, {
+      headers: { Authorization: `Bearer ${rcSecret}` },
+    })
+    if (!rcRes.ok) {
+      console.error(`[verify-sub] RevenueCat ${rcRes.status} pentru ${user.id}`)
+      return res.status(502).json({ error: 'RevenueCat error' })
+    }
+    const rcData = await rcRes.json()
+    const ent = rcData?.subscriber?.entitlements?.['Juridico Pro']
+    const now = Date.now()
+    const active = !!ent && (
+      ent.expires_date == null ||
+      new Date(ent.expires_date).getTime() > now ||
+      (ent.grace_period_expires_date && new Date(ent.grace_period_expires_date).getTime() > now)
+    )
+
+    if (active) {
+      await supabaseAdmin.from('profiles')
+        .update({ subscription_plan: 'pro', subscription_status: 'active' })
+        .eq('id', user.id)
+      subscriptionCache.delete(user.id)
+      console.log(`[verify-sub] ${user.id} -> pro/active`)
+      return res.json({ pro: true })
+    }
+
+    console.log(`[verify-sub] ${user.id} -> fara entitlement activ`)
+    return res.json({ pro: false })
+  } catch (e) {
+    console.error('[verify-sub] Eroare:', e.message)
+    return res.status(500).json({ error: e.message })
+  }
+})
+
 app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
