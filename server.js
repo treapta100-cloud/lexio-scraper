@@ -176,6 +176,45 @@ app.post('/verify-subscription', async (req, res) => {
   }
 })
 
+// Stergere cont — definit INAINTE de requireAuth (userii cu trial expirat trebuie
+// sa poata sterge contul chiar daca nu trec gate-ul de abonament).
+app.post('/delete-account', async (req, res) => {
+  if (!supabaseAdmin) return res.status(503).json({ error: 'Admin client not configured' })
+
+  const authHeader = req.headers['authorization']
+  if (!authHeader?.startsWith('Bearer ') || !supabase) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  const token = authHeader.slice(7)
+  const { data: { user }, error: authErr } = await supabase.auth.getUser(token)
+  if (authErr || !user) return res.status(401).json({ error: 'Unauthorized' })
+
+  try {
+    // Sterge fisierele din storage bucket 'documente' inainte de deleteUser
+    const { data: files } = await supabaseAdmin.storage
+      .from('documente')
+      .list(user.id, { limit: 1000 })
+    if (files && files.length > 0) {
+      const paths = files.map(f => `${user.id}/${f.name}`)
+      await supabaseAdmin.storage.from('documente').remove(paths)
+    }
+
+    // Sterge userul din auth — declanseaza CASCADE pe toate tabelele din DB
+    const { error: deleteErr } = await supabaseAdmin.auth.admin.deleteUser(user.id)
+    if (deleteErr) {
+      console.error('[delete-account] Eroare deleteUser:', deleteErr.message)
+      return res.status(500).json({ error: deleteErr.message })
+    }
+
+    subscriptionCache.delete(user.id)
+    console.log(`[delete-account] Cont sters: ${user.id}`)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[delete-account] Eroare:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
