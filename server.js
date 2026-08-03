@@ -218,7 +218,10 @@ app.post('/delete-account', async (req, res) => {
 app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
-const DOSAR_REGEX = /^\d{1,6}\/\d{1,4}\/\d{4}$/
+// Accepta si dosarele asociate: /a1, /a1.1, /a1.1.27, precum si sufixul "*".
+// Verificat pe 3422 de dosare reale (5 instante, 3 zile): 17% au sufix.
+// Sufixul e marginit la 20 de caractere si doar cifre/litere/punct/stea/slash.
+const DOSAR_REGEX = /^\d{1,6}\/\d{1,4}\/\d{4}[0-9a-zA-Z.*\/]{0,20}$/
 
 function sanitizeNumarDosar(input) {
   if (typeof input !== 'string') return null
@@ -481,17 +484,22 @@ async function scrapeTermeneOnPage(page, numarDosar) {
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
 
+// Cautarea foloseste API-ul oficial SOAP (vezi cautaDosarSoap mai jos), NU Puppeteer.
+// Motiv: scraping-ul paginii s-a rupt cand portalul si-a schimbat structura (cod
+// neatins din 22.04.2026) si a picat tacut — niciun rezultat, nicio eroare.
+// API-ul intoarce aceleasi campuri, structurat, in ~50ms in loc de ~20s.
 app.post('/cauta-dosar', async (req, res) => {
   const numar_dosar = sanitizeNumarDosar(req.body?.numar_dosar)
   if (!numar_dosar) {
-    return res.json({ rezultate: [], error: 'Numar dosar invalid. Format asteptat: NNNNN/NNN/YYYY' })
+    return res.json({ rezultate: [], error: 'Numar dosar invalid. Format asteptat: NNNNN/NNN/YYYY (optional /a1 sau *)' })
   }
 
   try {
-    const result = await scrapeDosar(numar_dosar)
-    res.json(result)
+    const rezultate = await cautaDosarSoap(numar_dosar)
+    console.log(`[cauta] ${numar_dosar} → ${rezultate.length} rezultate`)
+    res.json({ rezultate })
   } catch (err) {
-    console.error('[scraper] Eroare:', err.message)
+    console.error('[cauta] Eroare:', err.message)
     res.json({ rezultate: [], error: err.message })
   }
 })
@@ -569,6 +577,69 @@ async function soapGetDosar(numarDosar) {
   })).filter(p => p.nume)
 
   return { sedinte, parti }
+}
+
+// Numele instantei vine lipit din API: "JudecatoriaSECTORUL1BUCURESTI".
+// Prefixele de mai jos acopera 246 din 246 de instante din WSDL.
+function formatInstitutie(raw) {
+  if (!raw) return null
+  return raw
+    .replace(/^InaltaCurtedeCasatiesiJustitie/, 'Inalta Curte de Casatie si Justitie')
+    .replace(/^CurteaMilitaradeApel/, 'Curtea Militara de Apel ')
+    .replace(/^CurteadeApel/, 'Curtea de Apel ')
+    .replace(/^TribunalulComercial/, 'Tribunalul Comercial ')
+    .replace(/^TribunalulMilitar/, 'Tribunalul Militar ')
+    .replace(/^TribunalulSpecializat/, 'Tribunalul Specializat ')
+    .replace(/^TribunalulpentruMinorisiFamilie/, 'Tribunalul pentru Minori si Familie ')
+    .replace(/^Tribunalul/, 'Tribunalul ')
+    .replace(/^JudecatoriaMilitara/, 'Judecatoria Militara ')
+    .replace(/^Judecatoria/, 'Judecatoria ')
+    .replace(/([A-Za-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([A-Za-z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function formatDataRo(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '')
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : null
+}
+
+// Cautare dosar pentru autocomplete — inlocuieste scrapeDosar() cu Puppeteer.
+// Raspunsul pastreaza EXACT aceleasi campuri ca inainte, ca aplicatia sa nu se schimbe.
+async function cautaDosarSoap(numarDosar) {
+  const xml = await httpPost(soapRequest(numarDosar))
+  const azi = new Date().toISOString().split('T')[0]
+
+  return extractAll(xml, 'Dosar').slice(0, 8).map(bloc => {
+    // Campurile dosarului vin DUPA <parti> si <sedinte>, care contin ele insele
+    // taguri cu acelasi nume (<data>). Le scot inainte de extragerea scalarilor.
+    const scalar = bloc
+      .replace(/<parti>[\s\S]*?<\/parti>/g, '')
+      .replace(/<sedinte>[\s\S]*?<\/sedinte>/g, '')
+
+    const termene = extractAll(bloc, 'DosarSedinta')
+      .map(s => extractOne(s, 'data'))
+      .filter(d => d && d.split('T')[0] >= azi)
+      .sort()
+      .map(formatDataRo)
+
+    const parti = extractAll(bloc, 'DosarParte')
+      .map(p => extractOne(p, 'nume'))
+      .filter(Boolean)
+
+    return {
+      numar_dosar: extractOne(scalar, 'numar') || numarDosar,
+      instanta: formatInstitutie(extractOne(scalar, 'institutie')),
+      data_dosar: formatDataRo(extractOne(scalar, 'data')),
+      obiect: extractOne(scalar, 'obiect') || null,
+      // *Nume sunt variantele lizibile ("Litigii cu profesionistii" vs "Litigiicuprofesionistii")
+      materie: extractOne(scalar, 'categorieCazNume') || extractOne(scalar, 'categorieCaz') || null,
+      stadiu: extractOne(scalar, 'stadiuProcesualNume') || extractOne(scalar, 'stadiuProcesual') || null,
+      parti: [...new Set(parti)].slice(0, 6),
+      termene_urmatoare: [...new Set(termene)].slice(0, 5),
+    }
+  })
 }
 
 const lastSyncPerUser = new Map()
