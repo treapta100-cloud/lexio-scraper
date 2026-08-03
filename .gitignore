@@ -1,2 +1,16 @@
 node_modules/
 .env
+
+# Scripturi locale de administrare — CONTIN CHEI IN CLAR.
+# Repo-ul e PUBLIC. Nu se comit niciodata.
+#   parola aplicatie Gmail:  send-*.js
+#   cheia Resend:            send-notification.js
+#   parola DB Supabase:      import-penal.js, scrape-pdf.js
+send-*.js
+import-penal.js
+scrape-pdf.js
+check-ggcom.js
+response.json
+preview-penal-output.json
+preview-penal.js
+scrape-local.js
