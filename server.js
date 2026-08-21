@@ -796,7 +796,7 @@ app.get('/search-firma', async (req, res) => {
     const partiBlocks = extractAll(xml, 'DosarParte')
     const vazute = new Set()
     const rezultate = []
-    const qUpper = q.toUpperCase()
+    const qUpper = foldNume(q)
 
     function normalizeaza(n) {
       return n.toUpperCase()
@@ -815,7 +815,7 @@ app.get('/search-firma', async (req, res) => {
       const partiDosar = extractAll(dosar, 'DosarParte')
       for (const b of partiDosar) {
         const nume = extractOne(b, 'nume')
-        if (!nume || !nume.toUpperCase().includes(qUpper)) continue
+        if (!nume || !foldNume(nume).includes(qUpper)) continue
         const cheie = normalizeaza(nume)
         if (!firmeMap.has(cheie)) {
           firmeMap.set(cheie, { denumire: nume, instante: new Set(), nrDosare: 0 })
@@ -924,10 +924,27 @@ async function getOpenapiData(cui) {
   }
 }
 
+// Normalizeaza un nume de parte pentru comparatie: pliaza diacriticele si scoate
+// punctuatia. Portalul scrie "TERRA CONSTRUCŢII S.R.L." (cu T-sedila), iar userul
+// scrie "Terra Constructii SRL" — fara asta, `includes` esueaza pe caracterul Ţ si
+// dosarele firmei corecte dispar complet. NU scoate formele juridice (SC/SRL/SA):
+// masurat pe date reale, ar prinde 10 firme straine in loc de 1.
+function foldNume(s) {
+  return String(s || '')
+    .replace(/[ŢȚ]/g, 'T').replace(/[ţț]/g, 't')
+    .replace(/[ŞȘ]/g, 'S').replace(/[şș]/g, 's')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/\./g, '')       // abreviere: "S.R.L." -> "SRL"
+    .replace(/[\-,]/g, ' ')   // separator: "TARAN-POPESCU" -> "TARAN POPESCU"
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function getDosarePortal(numeParte) {
   const xml = await httpPost(soapRequestNumeParte(numeParte))
   const dosareBlocks = extractAll(xml, 'Dosar')
-  const qUpper = numeParte.toUpperCase()
+  const qUpper = foldNume(numeParte)
   const acum = new Date()
   const rezultate = []
 
@@ -938,7 +955,7 @@ async function getDosarePortal(numeParte) {
     const partiBlocks = extractAll(b, 'DosarParte')
     const parteGasita = partiBlocks.find(p => {
       const n = extractOne(p, 'nume') || ''
-      return n.toUpperCase().includes(qUpper)
+      return foldNume(n).includes(qUpper)
     })
     if (!parteGasita) continue
 
@@ -959,7 +976,10 @@ async function getDosarePortal(numeParte) {
       urmator_termen: viitoare[0] || null,
     })
 
-    if (rezultate.length >= 20) break
+    // Plafon ridicat de la 20 la 50: dupa normalizarea diacriticelor o firma reala
+    // poate avea legitim 30-40 de dosare (masurat: 36). Cu plafonul vechi, fixul ar
+    // fi inlocuit "1 dosar gresit" cu "20 din 36, tacut" — alta forma a aceleiasi minciuni.
+    if (rezultate.length >= 50) break
   }
 
   return rezultate
@@ -1027,6 +1047,17 @@ async function getBpiData(cui) {
     if (!resp.ok) return null
     const json = await resp.json()
     if (json.error) return null
+
+    // Sursa a raspuns HTTP 200 cu JSON valid, dar nu STIE — degradare tacita.
+    // cuiscan.ro si-a pierdut accesul la BPI (action=bpi raspunde "autentificare
+    // esuata") si intoarce inInsolventa:false + sursa:"necunoscut" pentru ORICE CUI,
+    // inclusiv firme aflate real in faliment. Separat, si-a schimbat schema: campul
+    // `proceduri` nu mai exista, deci inFaliment ar fi permanent false.
+    // Ambele conditii sunt necesare — sunt defecte independente.
+    // "Nu stiu" NU are voie sa devina "e curat": intr-o verificare de risc, valoarea
+    // sigura implicita e necunoscutul, nu absolvirea. Vezi memoria proiectului.
+    if (json.sursa === 'necunoscut' || !Array.isArray(json.proceduri)) return null
+
     const proceduri = json.proceduri || []
     const inFaliment = proceduri.some(p => {
       const tip = (p.tip || p.stadiu || p.descriere || '').toLowerCase()
