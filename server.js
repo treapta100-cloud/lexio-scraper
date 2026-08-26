@@ -873,16 +873,23 @@ async function getAnafData(cui) {
     body,
     signal: AbortSignal.timeout(8000),
   })
-  if (!resp.ok) throw new Error(`ANAF HTTP ${resp.status}`)
-  const json = await resp.json()
+  // ANAF raspunde 404 CU corp JSON valid ({"found":[],"notFound":[cui]}) cand CUI-ul
+  // pur si simplu nu exista — masurat 2026-08-25. Vechiul `if (!resp.ok) throw` punea
+  // "CUI inexistent" si "ANAF picat" in aceeasi galeata, iar o pana ANAF ar fi afisat
+  // "firma nu exista" pentru firme reale. Sunt doua lucruri diferite, cu doua mesaje.
+  const json = await resp.json().catch(() => null)
   const firma = json?.found?.[0]
-  if (!firma) return null
+  if (!firma) {
+    const inexistent = Array.isArray(json?.notFound) && json.notFound.length > 0
+    if (resp.ok || inexistent) return { stare: 'inexistent' }
+    return { stare: 'indisponibil' }
+  }
   const dg = firma.date_generale || {}
   const tva = firma.inregistrare_scop_Tva || {}
   const rtvai = firma.inregistrare_RTVAI || {}
   const inactivi = firma.stare_inactiv || {}
   const splitTva = firma.inregistrare_SplitTVA || {}
-  return {
+  return { stare: 'gasit', firma: {
     denumire: dg.denumire || null,
     cui: dg.cui || cuiCurat,
     adresa: dg.adresa || null,
@@ -899,7 +906,7 @@ async function getAnafData(cui) {
     data_reactivare: inactivi.dataReactivare || null,
     split_tva: splitTva.statusSplitTVA === true,
     e_factura: dg.statusRO_e_Factura === true,
-  }
+  } }
 }
 
 async function getOpenapiData(cui) {
@@ -909,10 +916,14 @@ async function getOpenapiData(cui) {
     headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
     signal: AbortSignal.timeout(8000),
   })
-  if (!resp.ok) return null
-  const json = await resp.json()
-  if (json?.error) return null
-  return {
+  // Planul gratuit openapi.ro = 100 interogari/luna. La depasire raspunde 429, iar
+  // vechiul `if (!resp.ok) return null` il trata identic cu "firma nu exista" → cardul
+  // ONRC ar fi scris "Negasit" pentru ORICE firma, tacut, pana la 1 ale lunii.
+  if (resp.status === 429) return { stare: 'cota' }
+  if (!resp.ok) return { stare: 'indisponibil' }
+  const json = await resp.json().catch(() => null)
+  if (!json || json.error) return { stare: 'inexistent' }
+  return { stare: 'gasit', firma: {
     nr_onrc: json?.numar_reg_com || null,
     adresa: json?.adresa || null,
     capital_social: json?.capital_social || null,
@@ -921,7 +932,7 @@ async function getOpenapiData(cui) {
     ultima_declaratie: json?.ultima_declaratie || null,
     impozit_micro: json?.impozit_micro || null,
     impozit_profit: json?.impozit_profit || null,
-  }
+  } }
 }
 
 // Normalizeaza un nume de parte pentru comparatie: pliaza diacriticele si scoate
@@ -947,6 +958,7 @@ async function getDosarePortal(numeParte) {
   const qUpper = foldNume(numeParte)
   const acum = new Date()
   const rezultate = []
+  let total = 0
 
   for (const b of dosareBlocks) {
     const numar = extractOne(b, 'numar')
@@ -967,8 +979,15 @@ async function getDosarePortal(numeParte) {
       .filter(s => s.data && new Date(s.data) >= acum)
       .sort((a, b) => new Date(a.data) - new Date(b.data))
 
+    total++
+    if (rezultate.length >= 50) continue
+
     rezultate.push({
       numar,
+      // Numele EXACT al partii, asa cum il scrie portalul. Clientul grupeaza dupa el,
+      // ca sa se vada ca "AQUA TERRA CONSTRUCTII SRL" e alta firma decat cea cautata,
+      // si ca "... PRIN LICHIDATOR JUDICIAR" e aceeasi firma in alta faza.
+      nume_parte: extractOne(parteGasita, 'nume') || null,
       instanta: extractOne(b, 'institutie'),
       obiect: extractOne(b, 'obiect'),
       stadiu: extractOne(b, 'stadiuProcesual'),
@@ -979,10 +998,12 @@ async function getDosarePortal(numeParte) {
     // Plafon ridicat de la 20 la 50: dupa normalizarea diacriticelor o firma reala
     // poate avea legitim 30-40 de dosare (masurat: 36). Cu plafonul vechi, fixul ar
     // fi inlocuit "1 dosar gresit" cu "20 din 36, tacut" — alta forma a aceleiasi minciuni.
-    if (rezultate.length >= 50) break
   }
 
-  return rezultate
+  // Nu mai iesim din bucla la 50: continuam sa NUMARAM potrivirile ca sa putem spune
+  // "50 din 143" in loc sa taiem tacut. Zero interogari in plus — raspunsul portalului
+  // e deja in memorie.
+  return { dosare: rezultate, total }
 }
 
 app.post('/grok-terms', async (req, res) => {
@@ -1048,40 +1069,78 @@ async function getBpiData(cui) {
     const json = await resp.json()
     if (json.error) return null
 
-    // Sursa a raspuns HTTP 200 cu JSON valid, dar nu STIE — degradare tacita.
-    // cuiscan.ro si-a pierdut accesul la BPI (action=bpi raspunde "autentificare
-    // esuata") si intoarce inInsolventa:false + sursa:"necunoscut" pentru ORICE CUI,
-    // inclusiv firme aflate real in faliment. Separat, si-a schimbat schema: campul
-    // `proceduri` nu mai exista, deci inFaliment ar fi permanent false.
-    // Ambele conditii sunt necesare — sunt defecte independente.
-    // "Nu stiu" NU are voie sa devina "e curat": intr-o verificare de risc, valoarea
-    // sigura implicita e necunoscutul, nu absolvirea. Vezi memoria proiectului.
-    if (json.sursa === 'necunoscut' || !Array.isArray(json.proceduri)) return null
+    // REGULA ASIMETRICA — credem doar semnalul POZITIV, cu sursa numita.
+    //
+    // Istoric: pe 2026-08-21 sursa raspundea sursa:"necunoscut" + inInsolventa:false
+    // pentru ORICE CUI, inclusiv firme real in faliment — o degradare tacita care
+    // desena doua bife verzi. Filtrul de atunci respingea tot.
+    // Pe 2026-08-26 sursa si-a revenit PARTIAL (masurat pe 4 CUI-uri): cand gaseste
+    // ceva in BPI raspunde sursa:"BPI-ONRC" + inInsolventa:true; cand nu stie,
+    // raspunde tot sursa:"necunoscut". Campul `proceduri` a disparut definitiv, deci
+    // falimentul nu mai poate fi distins de insolventa.
+    //
+    // De aici regula: putem AVERTIZA, dar nu absolvim niciodata.
+    //   - sursa numita + inInsolventa===true  -> "DA"
+    //   - orice altceva                        -> null, adica "Indisponibil"
+    // Nu returnam niciodata "NU": intr-o verificare de risc, lipsa informatiei nu
+    // are voie sa devina liniste. Un fals negativ aici costa un client.
+    if (!json.sursa || json.sursa === 'necunoscut') return null
+    if (json.inInsolventa !== true) return null
 
-    const proceduri = json.proceduri || []
-    const inFaliment = proceduri.some(p => {
-      const tip = (p.tip || p.stadiu || p.descriere || '').toLowerCase()
-      return tip.includes('faliment') || tip.includes('lichidare')
-    })
-    return { inInsolventa: json.inInsolventa === true, inFaliment }
+    return { inInsolventa: true, sursa: String(json.sursa) }
   } catch (_) {
     return null
   }
 }
 
 app.post('/due-diligence', async (req, res) => {
-  const { cui, denumire } = req.body || {}
-  if (!cui && !denumire) {
+  const { cui, denumire, client_version } = req.body || {}
+
+  // ─── Varianta C — poarta se aplica DOAR clientilor care stiu sa afiseze refuzul ───
+  // Aplicatiile <= 1.2.3 (Android) / 1.0.3 (iOS) nu trimit `client_version`. Pentru ele
+  // raspunsul ramane BIT-IDENTIC cu cel de dinainte. Daca le-am aplica poarta, ar afisa
+  // "Debug: 400" + "Niciun dosar gasit pe portal.just.ro" — adica exact minciuna pe care
+  // o reparam — pana cand fiecare utilizator isi actualizeaza aplicatia din magazin
+  // (saptamani, nu zile; unii niciodata). Ramura se sterge cand `1.2.3` dispare din teren.
+  const clientNou = typeof client_version === 'string' && client_version.length > 0
+
+  if (clientNou) {
+    // Modulul verifica FIRME. O persoana fizica nu are CUI, deci CUI-ul obligatoriu e
+    // poarta — nu o lista de forme juridice: `forma_juridica` vine GOALA de la ANAF
+    // pentru PFA, II si institutii publice (masurat 2026-08-25), deci nu se poate valida.
+    if (!cui) {
+      return res.status(400).json({ error: 'CUI obligatoriu', motiv: 'cui_lipsa' })
+    }
+    if (!denumire) {
+      return res.status(400).json({ error: 'Denumire obligatorie', motiv: 'denumire_lipsa' })
+    }
+  } else if (!cui && !denumire) {
     return res.status(400).json({ error: 'Furnizeaza CUI sau denumire firma' })
   }
 
-  console.log(`[due-diligence] Verificare: CUI=${cui} / denumire=${denumire}`)
+  console.log(`[due-diligence] Verificare: CUI=${cui} / denumire=${denumire} / client=${client_version || 'vechi'}`)
 
   // Pas 1 — ANAF primul (avem nevoie de denumire pentru portal)
   let anaf = null
   let anafOk = false
+  let anafMotiv = 'necautat'
   if (cui) {
-    try { anaf = await getAnafData(cui); anafOk = true } catch (_) {}
+    try {
+      const r = await getAnafData(cui)
+      if (r && r.stare === 'gasit') { anaf = r.firma; anafOk = true; anafMotiv = 'gasit' }
+      else { anafMotiv = (r && r.stare) || 'indisponibil' }
+    } catch (_) { anafMotiv = 'indisponibil' }
+  }
+
+  // Poarta a doua: daca ANAF nu confirma existenta firmei, nu mai interogam nimic.
+  // "CUI inexistent" si "ANAF picat" primesc mesaje DIFERITE — al doilea nu are voie
+  // sa afirme nimic despre firma.
+  if (clientNou && !anaf) {
+    const inexistent = anafMotiv === 'inexistent'
+    return res.status(400).json({
+      error: inexistent ? 'CUI inexistent in evidenta ANAF' : 'ANAF indisponibil',
+      motiv: inexistent ? 'cui_inexistent' : 'anaf_indisponibil',
+    })
   }
 
   // Pas 2 — portal + openapi + BPI in paralel
@@ -1090,21 +1149,41 @@ app.post('/due-diligence', async (req, res) => {
 
   const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
-    numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve([]),
+    numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve({ dosare: [], total: 0 }),
     cui ? getBpiData(cui) : Promise.resolve(null),
   ])
 
+  const portalVal = dosareResult.status === 'fulfilled' ? dosareResult.value : null
+  const dosare = portalVal?.dosare ?? []
+  const totalPortal = portalVal?.total ?? 0
+
+  // Zero dosare inseamna trei lucruri diferite. Clientul vechi le scria pe toate
+  // "Niciun dosar gasit" — liniste falsa. Serverul spune acum CARE din ele e.
+  let motivPortal
+  if (!numePentruPortal) motivPortal = 'necautat'
+  else if (dosareResult.status !== 'fulfilled') motivPortal = 'portal_indisponibil'
+  else if (dosare.length === 0) motivPortal = 'fara_dosare'
+  else motivPortal = 'gasit'
+
+  const oaVal = openapiResult.status === 'fulfilled' ? openapiResult.value : null
+  const openapi = oaVal && oaVal.stare === 'gasit' ? oaVal.firma : null
+  const openapiMotiv = cui ? (oaVal?.stare || 'indisponibil') : 'necautat'
+
   res.json({
+    // ─── campuri istorice, forma neschimbata pentru clientii vechi ───
     anaf,
-    openapi: openapiResult.status === 'fulfilled' ? openapiResult.value : null,
-    dosare_portal: dosareResult.status === 'fulfilled' ? dosareResult.value : [],
+    openapi,
+    dosare_portal: dosare,
     bpi: bpiResult.status === 'fulfilled' ? bpiResult.value : null,
     surse: {
       anaf: anafOk,
-      openapi: openapiResult.status === 'fulfilled' && openapiResult.value !== null,
+      openapi: openapi !== null,
       portal: dosareResult.status === 'fulfilled',
       bpi: bpiResult.status === 'fulfilled' && bpiResult.value !== null,
     },
+    // ─── campuri noi; clientii vechi le ignora ───
+    motive: { anaf: anafMotiv, onrc: openapiMotiv, portal: motivPortal },
+    total_portal: totalPortal,
   })
 })
 
