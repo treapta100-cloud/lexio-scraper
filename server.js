@@ -1143,8 +1143,32 @@ app.post('/due-diligence', async (req, res) => {
     })
   }
 
+  // Poarta a treia — denumirea tastata trebuie sa aiba legatura cu CUI-ul.
+  // Fara ea, "CRETU LUCIAN" + CUI-ul unei firme reale intorcea 95 de dosare ale unor
+  // persoane fizice diferite, afisate sub numele si datele fiscale ale firmei: borsul,
+  // pe usa din dos, si mai convingator decat inainte fiindca avea acoperirea unui CUI
+  // valid. Verificat pe date reale 2026-08-26.
+  // Comparatie tolerantă, in ambele sensuri, dupa pliere: "TERRA CONSTRUCTII" si
+  // "SC TERRA CONSTRUCTII SRL" trec amandoua, "CRETU LUCIAN" nu. Prinde si greselile
+  // de tastare, nu doar nepotrivirile grosolane.
+  if (clientNou) {
+    const oficial = foldNume(anaf.denumire || '')
+    const tastat = foldNume(denumire)
+    if (!oficial || !tastat || !(oficial.includes(tastat) || tastat.includes(oficial))) {
+      return res.status(400).json({
+        error: 'Denumirea nu corespunde CUI-ului',
+        motiv: 'denumire_gresita',
+        denumire_oficiala: anaf.denumire || null,
+      })
+    }
+  }
+
   // Pas 2 — portal + openapi + BPI in paralel
-  const numePentruPortal = denumire || anaf?.denumire || ''
+  // Clientii noi pornesc MEREU de la denumirea oficiala ANAF — e autoritativa si
+  // corespunde CUI-ului deja verificat. Precedenta inversa (numele tastat primul) e
+  // cea care a produs defectul de mai sus. Clientii vechi o pastreaza (varianta C):
+  // ei pot cauta si fara CUI, deci numele tastat e tot ce au.
+  const numePentruPortal = clientNou ? (anaf?.denumire || '') : (denumire || anaf?.denumire || '')
   console.log(`[due-diligence] Cautare cu: "${numePentruPortal}"`)
 
   const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([

@@ -194,6 +194,34 @@ async function testeEndpoint() {
       typeof n5.json.total_portal === 'number' && n5.json.total_portal >= n5.json.dosare_portal.length,
       `${n5.json.dosare_portal.length} afisate din ${n5.json.total_portal}`)
 
+    // ── Denumirea trebuie sa corespunda CUI-ului.
+    // "CRETU LUCIAN" + CUI-ul unei firme reale intorcea 95 de dosare ale unor persoane
+    // fizice DIFERITE, afisate sub numele si datele fiscale ale firmei. Poarta pe CUI
+    // singura nu era suficienta: dadea acoperire legitima unui rezultat strain.
+    const n7 = await cereDD({ cui: CUI_TEST, denumire: 'CRETU LUCIAN', ...V })
+    verifica('nou: denumire fara legatura cu CUI-ul => blocat',
+      n7.status === 400 && n7.json.motiv === 'denumire_gresita', `${n7.status} / ${n7.json.motiv}`)
+    verifica('nou: refuzul spune a cui e de fapt CUI-ul',
+      String(n7.json.denumire_oficiala || '').includes('TERRA'), String(n7.json.denumire_oficiala))
+
+    // Variantele legitime de scriere NU au voie sa fie blocate — altfel poarta
+    // devine o piedica pentru utilizatorii corecti.
+    for (const varianta of ['TERRA CONSTRUCTII', 'SC TERRA CONSTRUCTII SRL', 'terra constructii srl']) {
+      const rv = await cereDD({ cui: CUI_TEST, denumire: varianta, ...V })
+      verifica(`nou: denumirea "${varianta}" trece`, rv.status === 200, `status ${rv.status}`)
+    }
+
+    // Chiar si cand denumirea trece, portalul se cauta cu numele OFICIAL de la ANAF,
+    // nu cu ce a tastat utilizatorul.
+    const n8 = await cereDD({ cui: CUI_TEST, denumire: 'TERRA CONSTRUCTII', ...V })
+    // Invariantul corect: fiecare parte returnata contine numele FIRMEI.
+    // (Nu "niciun CRETU": numele administratorului apare legitim in denumirea partii —
+    // "TERRA CONSTRUCŢII SRL PRIN ADMINISTRATOR SPECIAL CREŢU LUCIAN" e tot firma.)
+    const partiN8 = (n8.json.dosare_portal || []).map(d => foldNume(d.nume_parte || ''))
+    verifica('nou: portalul foloseste denumirea oficiala, nu pe cea tastata',
+      partiN8.length >= MIN_DOSARE_ASTEPTATE && partiN8.every(p => p.includes('TERRA CONSTRUCTII')),
+      `${partiN8.length} dosare, toate cu numele firmei in partea potrivita`)
+
     // Trunchierea: cerem o interogare larga, peste plafonul de 50.
     // Portalul refuza uneori interogarile foarte largi (raspuns gol, fara eroare).
     // Nu declaram FAIL pe indisponibilitatea LOR — ar fi un test care pica aleatoriu
