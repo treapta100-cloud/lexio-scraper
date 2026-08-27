@@ -1118,7 +1118,12 @@ app.post('/due-diligence', async (req, res) => {
     return res.status(400).json({ error: 'Furnizeaza CUI sau denumire firma' })
   }
 
-  console.log(`[due-diligence] Verificare: CUI=${cui} / denumire=${denumire} / client=${client_version || 'vechi'}`)
+  // Denumirea NU se logheaza, intentionat. Restul modulului e trecator — interogheaza,
+  // afiseaza, nu retine nimic. Logurile Railway sunt SINGURUL loc unde ceva persista,
+  // iar pentru un PFA denumirea e numele unei persoane fizice. CUI-ul e suficient
+  // pentru diagnostic; numele se obtine de la ANAF intr-un apel, cand chiar e nevoie.
+  // Nu pune denumirea la loc "ca sa fie mai usor de depanat".
+  console.log(`[due-diligence] Verificare: CUI=${cui} / client=${client_version || 'vechi'}`)
 
   // Pas 1 — ANAF primul (avem nevoie de denumire pentru portal)
   let anaf = null
@@ -1169,7 +1174,8 @@ app.post('/due-diligence', async (req, res) => {
   // cea care a produs defectul de mai sus. Clientii vechi o pastreaza (varianta C):
   // ei pot cauta si fara CUI, deci numele tastat e tot ce au.
   const numePentruPortal = clientNou ? (anaf?.denumire || '') : (denumire || anaf?.denumire || '')
-  console.log(`[due-diligence] Cautare cu: "${numePentruPortal}"`)
+  // Acelasi motiv ca mai sus: numele oficial ANAF poate fi numele unui om (PFA).
+  console.log(`[due-diligence] Cautare portal pornita (CUI=${cui})`)
 
   const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
