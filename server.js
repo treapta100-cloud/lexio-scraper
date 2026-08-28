@@ -839,7 +839,8 @@ app.get('/search-firma', async (req, res) => {
 
     rezultate.sort((a, b) => (b.nr_dosare || 0) - (a.nr_dosare || 0))
 
-    console.log(`[search-firma] "${q}" → ${rezultate.length} sugestii din portal.just.ro`)
+    // Nu logam textul cautat (q) — poate fi nume de persoana, la fel ca fix-ul din 27 aug de la /due-diligence.
+    console.log(`[search-firma] ${rezultate.length} sugestii din portal.just.ro`)
     res.json({ rezultate })
   } catch (e) {
     console.log('[search-firma] Eroare:', e.message)
