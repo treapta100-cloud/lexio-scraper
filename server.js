@@ -890,6 +890,16 @@ async function getAnafData(cui) {
   const rtvai = firma.inregistrare_RTVAI || {}
   const inactivi = firma.stare_inactiv || {}
   const splitTva = firma.inregistrare_SplitTVA || {}
+  const sediu = firma.adresa_sediu_social || {}
+  // ANAF trimite sediul social ca obiect structurat, nu ca text gata format —
+  // spre deosebire de dg.adresa, care e deja un string (posibil alt continut,
+  // domiciliul fiscal poate diferi de sediul social pentru unele firme).
+  const sediuSocial = [
+    [sediu.sdenumire_Strada, sediu.snumar_Strada && `nr. ${sediu.snumar_Strada}`].filter(Boolean).join(' '),
+    sediu.sdenumire_Localitate,
+    sediu.sdenumire_Judet,
+  ].filter(Boolean).join(', ') || null
+
   return { stare: 'gasit', firma: {
     denumire: dg.denumire || null,
     cui: dg.cui || cuiCurat,
@@ -905,8 +915,11 @@ async function getAnafData(cui) {
     inactiv: inactivi.statusInactivi === true,
     data_inactivare: inactivi.dataInactivare || null,
     data_reactivare: inactivi.dataReactivare || null,
+    data_radiere: inactivi.dataRadiere || null,
     split_tva: splitTva.statusSplitTVA === true,
     e_factura: dg.statusRO_e_Factura === true,
+    sediu_social: sediuSocial,
+    organ_fiscal: dg.organFiscalCompetent || null,
   } }
 }
 
@@ -968,6 +981,10 @@ async function getBalanteData(cui) {
       pierdere_neta: d.pierdere_neta ?? null,
       datorii_total: d.datorii_total ?? null,
       nr_angajati: d.numar_mediu_de_salariati ?? null,
+      capitaluri_total: d.capitaluri_total ?? null,
+      venituri_totale: d.venituri_totale ?? null,
+      cheltuieli_totale: d.cheltuieli_totale ?? null,
+      creante: d.creante ?? null,
     } }
   }
   return { stare: 'inexistent' } // niciun bilant gasit pe ultimii 2 ani
