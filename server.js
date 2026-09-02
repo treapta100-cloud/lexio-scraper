@@ -936,6 +936,43 @@ async function getOpenapiData(cui) {
   } }
 }
 
+// Bilantul cel mai recent depus e de obicei anul-1 (bilanturile se depun pana in mai
+// anul urmator, plus lag de indexare la sursa). Incearca anul-1, apoi anul-2 daca
+// primul da 404 — testat pe date reale 2026-09-02: firme mari au anul-1 disponibil,
+// dar nu toate firmele l-au depus/indexat inca la aceasta data din an.
+async function getBalanteData(cui) {
+  if (!cui) return null
+  const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
+  const anCurent = new Date().getFullYear()
+  for (const an of [anCurent - 1, anCurent - 2]) {
+    let resp
+    try {
+      resp = await fetch(`https://api.openapi.ro/api/companies/${cuiCurat}/balances/${an}`, {
+        headers: { 'x-api-key': process.env.OPENAPI_RO_KEY || '' },
+        signal: AbortSignal.timeout(8000),
+      })
+    } catch (_) {
+      return { stare: 'indisponibil' }
+    }
+    // Aceeasi cota lunara ca /companies (verificat pe headerele X-Quota-* 2026-09-02) —
+    // consuma o unitate suplimentara per verificare DD.
+    if (resp.status === 429) return { stare: 'cota' }
+    if (resp.status === 404) continue // firma nu are bilant depus/indexat pentru acest an
+    if (!resp.ok) return { stare: 'indisponibil' }
+    const json = await resp.json().catch(() => null)
+    const d = json?.data
+    if (!d) continue
+    return { stare: 'gasit', an: json.year || an, date: {
+      cifra_afaceri: d.cifra_de_afaceri_neta ?? null,
+      profit_net: d.profit_net ?? null,
+      pierdere_neta: d.pierdere_neta ?? null,
+      datorii_total: d.datorii_total ?? null,
+      nr_angajati: d.numar_mediu_de_salariati ?? null,
+    } }
+  }
+  return { stare: 'inexistent' } // niciun bilant gasit pe ultimii 2 ani
+}
+
 // Normalizeaza un nume de parte pentru comparatie: pliaza diacriticele si scoate
 // punctuatia. Portalul scrie "TERRA CONSTRUCŢII S.R.L." (cu T-sedila), iar userul
 // scrie "Terra Constructii SRL" — fara asta, `includes` esueaza pe caracterul Ţ si
@@ -1178,10 +1215,11 @@ app.post('/due-diligence', async (req, res) => {
   // Acelasi motiv ca mai sus: numele oficial ANAF poate fi numele unui om (PFA).
   console.log(`[due-diligence] Cautare portal pornita (CUI=${cui})`)
 
-  const [openapiResult, dosareResult, bpiResult] = await Promise.allSettled([
+  const [openapiResult, dosareResult, bpiResult, balanteResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
     numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve({ dosare: [], total: 0 }),
     cui ? getBpiData(cui) : Promise.resolve(null),
+    cui ? getBalanteData(cui) : Promise.resolve(null),
   ])
 
   const portalVal = dosareResult.status === 'fulfilled' ? dosareResult.value : null
@@ -1200,6 +1238,10 @@ app.post('/due-diligence', async (req, res) => {
   const openapi = oaVal && oaVal.stare === 'gasit' ? oaVal.firma : null
   const openapiMotiv = cui ? (oaVal?.stare || 'indisponibil') : 'necautat'
 
+  const balVal = balanteResult.status === 'fulfilled' ? balanteResult.value : null
+  const situatiiFinanciare = balVal && balVal.stare === 'gasit' ? { an: balVal.an, ...balVal.date } : null
+  const financiarMotiv = cui ? (balVal?.stare || 'indisponibil') : 'necautat'
+
   res.json({
     // ─── campuri istorice, forma neschimbata pentru clientii vechi ───
     anaf,
@@ -1213,8 +1255,9 @@ app.post('/due-diligence', async (req, res) => {
       bpi: bpiResult.status === 'fulfilled' && bpiResult.value !== null,
     },
     // ─── campuri noi; clientii vechi le ignora ───
-    motive: { anaf: anafMotiv, onrc: openapiMotiv, portal: motivPortal },
+    motive: { anaf: anafMotiv, onrc: openapiMotiv, portal: motivPortal, financiar: financiarMotiv },
     total_portal: totalPortal,
+    situatii_financiare: situatiiFinanciare,
   })
 })
 
