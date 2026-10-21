@@ -561,14 +561,33 @@ function extractOne(xml, tag) {
 async function soapGetDosar(numarDosar) {
   const xml = await httpPost(soapRequest(numarDosar))
 
-  const sedinteBlocks = extractAll(xml, 'DosarSedinta')
-  const sedinte = sedinteBlocks.map(b => ({
-    data: extractOne(b, 'data'),
-    ora: extractOne(b, 'ora'),
-    complet: extractOne(b, 'complet'),
-    solutie: extractOne(b, 'solutie'),
-    documentSedinta: extractOne(b, 'documentSedinta'),
-  })).filter(s => s.data)
+  // Acelasi numar poate intoarce mai multe dosare (fond + apel) — fiecare sedinta
+  // pastreaza instanta si stadiul blocului ei. Ordinea sedintelor ramane cea din XML.
+  // Campurile noi (solutieSumar, dataPronuntare, numarDocument, instanta, stadiu) se
+  // adauga peste cele vechi; aplicatiile vechi le ignora.
+  const sedinte = extractAll(xml, 'Dosar').flatMap(bloc => {
+    const scalar = bloc
+      .replace(/<parti>[\s\S]*?<\/parti>/g, '')
+      .replace(/<sedinte>[\s\S]*?<\/sedinte>/g, '')
+    const instanta = formatInstitutie(extractOne(scalar, 'institutie'))
+    const stadiu = extractOne(scalar, 'stadiuProcesualNume') || extractOne(scalar, 'stadiuProcesual') || null
+
+    return extractAll(bloc, 'DosarSedinta').map(b => {
+      const pronuntare = (extractOne(b, 'dataPronuntare') || '').split('T')[0]
+      return {
+        data: extractOne(b, 'data'),
+        ora: extractOne(b, 'ora'),
+        complet: extractOne(b, 'complet'),
+        solutie: extractOne(b, 'solutie'),
+        documentSedinta: extractOne(b, 'documentSedinta'),
+        solutieSumar: extractOne(b, 'solutieSumar') || null,
+        dataPronuntare: pronuntare && pronuntare !== '0001-01-01' ? pronuntare : null,
+        numarDocument: extractOne(b, 'numarDocument') || null,
+        instanta,
+        stadiu,
+      }
+    })
+  }).filter(s => s.data)
 
   const partiBlocks = extractAll(xml, 'DosarParte')
   const parti = partiBlocks.map(b => ({
