@@ -1167,6 +1167,52 @@ async function getBpiData(cui) {
   }
 }
 
+// Insolventa din API-ul oficial de bilanturi ANAF (gratuit, fara cheie). La firmele in
+// procedura, ONRC adauga la denumire un sufix ("-IN INSOLVENTA", "-IN FALIMENT") care
+// apare in campul `deni` al bilantului. Semnalul e legat de CUI, nu de nume — fara riscul
+// omonimelor de pe portal. Adaugat 2026-10-25, cand cuiscan a pierdut accesul la BPI.
+//
+// Ne uitam DOAR la cel mai recent bilant depus (anul trecut, altfel -2, -3): o firma
+// reorganizata care si-a scos sufixul nu mai e marcata. "IN LICHIDARE" nu e insolventa
+// (dizolvare voluntara) si nu se marcheaza.
+// Aceeasi regula asimetrica ca la cuiscan: fara sufix -> null ("Indisponibil"), niciodata
+// "NU" — o insolventa deschisa dupa ultimul bilant nu are cum sa apara aici.
+// Masurat 2026-10-25: sufixul apare si fara "IN" ("SEGAMA SRL- FALIMENT"), deci cuvantul
+// de procedura e acceptat si singur, dar doar la FINALUL denumirii. Si: multe firme in
+// insolventa (dosar deschis pe portal) au denumirea ANAF FARA sufix — acoperire partiala.
+const SUFIX_INSOLVENTA = /\bIN (INSOLVENTA|INSOLVENCY|REORGANIZARE|FALIMENT|BANKRUPTCY)\b|\b(INSOLVENTA|INSOLVENCY|REORGANIZARE|FALIMENT|BANKRUPTCY)$/
+const PRACTICIAN_INSOLVENTA = /\b(SPRL|IPURL)\b|CABINET (INDIVIDUAL )?DE INSOLVENTA/
+
+async function getInsolventaAnaf(cui) {
+  const cuiCurat = String(cui).replace(/^RO/i, '').replace(/\s/g, '').trim()
+  if (!/^\d{1,10}$/.test(cuiCurat)) return null
+  const anCurent = new Date().getFullYear()
+  for (const an of [anCurent - 1, anCurent - 2, anCurent - 3]) {
+    try {
+      const resp = await fetch(`https://webservicesp.anaf.ro/bilant?an=${an}&cui=${cuiCurat}`, {
+        signal: AbortSignal.timeout(6000),
+      })
+      if (!resp.ok) return null
+      const json = await resp.json()
+      const deni = String(json?.deni || '').trim()
+      if (!deni) continue // bilant nedepus pe anul asta -> anul anterior
+      const nume = foldNume(deni)
+      // Practicienii in insolventa ("... IN INSOLVENTA SPRL", cabinete individuale) au
+      // cuvantul in NUME, nu ca sufix de procedura — ar fi marcati fals.
+      if (PRACTICIAN_INSOLVENTA.test(nume)) return null
+      const m = nume.match(SUFIX_INSOLVENTA)
+      if (!m) return null
+      const cuvant = m[1] || m[2]
+      const stadiu = cuvant === 'FALIMENT' || cuvant === 'BANKRUPTCY' ? 'faliment'
+        : cuvant === 'REORGANIZARE' ? 'reorganizare' : 'insolventa'
+      return { inInsolventa: true, sursa: `ANAF — bilanț ${an}: „${deni}”`, stadiu, an }
+    } catch (_) {
+      return null
+    }
+  }
+  return null
+}
+
 app.post('/due-diligence', async (req, res) => {
   const { cui, denumire, client_version } = req.body || {}
 
@@ -1251,10 +1297,11 @@ app.post('/due-diligence', async (req, res) => {
   // Acelasi motiv ca mai sus: numele oficial ANAF poate fi numele unui om (PFA).
   console.log(`[due-diligence] Cautare portal pornita (CUI=${cui})`)
 
+  // BPI: semnalul ANAF (legat de CUI) are prioritate; cuiscan ramane rezerva.
   const [openapiResult, dosareResult, bpiResult, balanteResult] = await Promise.allSettled([
     cui ? getOpenapiData(cui) : Promise.resolve(null),
     numePentruPortal ? getDosarePortal(numePentruPortal) : Promise.resolve({ dosare: [], total: 0 }),
-    cui ? getBpiData(cui) : Promise.resolve(null),
+    cui ? Promise.all([getInsolventaAnaf(cui), getBpiData(cui)]).then(([a, c]) => a || c) : Promise.resolve(null),
     cui ? getBalanteData(cui) : Promise.resolve(null),
   ])
 
