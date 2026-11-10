@@ -655,7 +655,7 @@ async function cautaDosarSoap(numarDosar) {
       // *Nume sunt variantele lizibile ("Litigii cu profesionistii" vs "Litigiicuprofesionistii")
       materie: extractOne(scalar, 'categorieCazNume') || extractOne(scalar, 'categorieCaz') || null,
       stadiu: extractOne(scalar, 'stadiuProcesualNume') || extractOne(scalar, 'stadiuProcesual') || null,
-      parti: [...new Set(parti)].slice(0, 6),
+      parti: [...new Set(parti)].slice(0, 30), // fond funciar: frecvent 10–30 de parti (masurat 2026-11-10 pe 113 dosare reale)
       termene_urmatoare: [...new Set(termene)].slice(0, 5),
     }
   })
