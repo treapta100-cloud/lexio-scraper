@@ -86,6 +86,29 @@ const limiter = rateLimit({
 
 app.use(limiter)
 
+// Acces „Juridico Pro” activ in RevenueCat (abonament platit, perioada de gratie sau acces promotional
+// acordat manual). Aceeasi regula ca /verify-subscription. true / false; null = RevenueCat indisponibil.
+async function accesActivRevenueCat(userId) {
+  const rcSecret = process.env.REVENUECAT_SECRET_KEY
+  if (!rcSecret) return null
+  try {
+    const rcRes = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(userId)}`, {
+      headers: { Authorization: `Bearer ${rcSecret}` },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!rcRes.ok) return null
+    const ent = (await rcRes.json())?.subscriber?.entitlements?.['Juridico Pro']
+    const now = Date.now()
+    return !!ent && (
+      ent.expires_date == null ||
+      new Date(ent.expires_date).getTime() > now ||
+      (!!ent.grace_period_expires_date && new Date(ent.grace_period_expires_date).getTime() > now)
+    )
+  } catch {
+    return null
+  }
+}
+
 // RevenueCat webhook — fara requireAuth (RevenueCat nu trimite JWT de user)
 app.post('/revenuecat-webhook', async (req, res) => {
   if (!supabaseAdmin) return res.status(503).json({ error: 'Admin client not configured' })
@@ -110,9 +133,23 @@ app.post('/revenuecat-webhook', async (req, res) => {
       subscriptionCache.delete(userId)
       console.log(`[rc-webhook] ${event.type} → pro/active pentru ${userId}`)
     } else if (cancelTypes.includes(event.type)) {
-      await supabaseAdmin.from('profiles').update({ subscription_plan: 'free', subscription_status: 'inactive' }).eq('id', userId)
-      subscriptionCache.delete(userId)
-      console.log(`[rc-webhook] ${event.type} → free/inactive pentru ${userId}`)
+      // Retrogradam DOAR daca RevenueCat confirma ca nu mai exista niciun acces activ. Altfel:
+      //  - CANCELLATION = reinnoire oprita, dar perioada platita continua;
+      //  - BILLING_ISSUE = plata esuata temporar, perioada de gratie;
+      //  - conturile cu acces promotional (pro manual) nu mai sunt retrogradate de abonamente de test expirate.
+      const activ = await accesActivRevenueCat(userId)
+      if (activ === null) {
+        // RevenueCat indisponibil: nu ghicim; raspundem cu eroare si RevenueCat retrimite evenimentul
+        console.error(`[rc-webhook] ${event.type} pentru ${userId}: RevenueCat indisponibil, se va reincerca`)
+        return res.status(503).json({ error: 'RevenueCat indisponibil' })
+      }
+      if (activ) {
+        console.log(`[rc-webhook] ${event.type} ignorat: acces Juridico Pro inca activ pentru ${userId}`)
+      } else {
+        await supabaseAdmin.from('profiles').update({ subscription_plan: 'free', subscription_status: 'inactive' }).eq('id', userId)
+        subscriptionCache.delete(userId)
+        console.log(`[rc-webhook] ${event.type} → free/inactive pentru ${userId}`)
+      }
     } else {
       console.log(`[rc-webhook] Event ignorat: ${event.type}`)
     }
