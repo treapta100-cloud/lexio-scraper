@@ -72,20 +72,27 @@ async function verifica(soapGetDosar) {
 
 // ── Email ────────────────────────────────────────────────────────────────────
 
+// Prin API-ul HTTPS Resend, NU prin SMTP: Railway Hobby blocheaza porturile SMTP (25/465/587/2525),
+// confirmat 17 nov 2026. Fara domeniu verificat, Resend livreaza DOAR catre proprietarul contului
+// (treapta100@gmail.com) — de acolo un filtru Gmail redirectioneaza pe fullagenda (decizie user).
+// Prefixul [Canar Juridico] din subiect e cheia filtrului: nu-l scoate.
 async function trimiteEmail(subiect, text, html) {
-  const { GMAIL_USER, GMAIL_APP_PASSWORD, ALERT_EMAIL } = process.env
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD || !ALERT_EMAIL) {
-    console.log('[canar] email neconfigurat — lipsesc variabilele GMAIL_USER / GMAIL_APP_PASSWORD / ALERT_EMAIL')
+  const { RESEND_API_KEY, ALERT_EMAIL } = process.env
+  if (!RESEND_API_KEY || !ALERT_EMAIL) {
+    console.log('[canar] email neconfigurat — lipsesc variabilele RESEND_API_KEY / ALERT_EMAIL')
     return false
   }
   try {
-    // Incarcat aici, nu la pornire: daca pachetul ar lipsi, pica doar emailul, nu serverul.
-    const nodemailer = require('nodemailer')
-    const t = nodemailer.createTransport({
-      host: 'smtp.gmail.com', port: 587, secure: false,
-      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: 'Juridico Canar <onboarding@resend.dev>', to: [ALERT_EMAIL], subject: `[Canar Juridico] ${subiect}`, text, html }),
+      signal: AbortSignal.timeout(15000),
     })
-    await t.sendMail({ from: `Juridico Canar <${GMAIL_USER}>`, to: ALERT_EMAIL, subject: subiect, text, html })
+    if (!r.ok) {
+      console.log(`[canar] email esuat: HTTP ${r.status} ${(await r.text().catch(() => '')).slice(0, 160)}`)
+      return false
+    }
     console.log(`[canar] email trimis: ${subiect}`)
     return true
   } catch (e) {
@@ -316,4 +323,4 @@ function init({ app, cron, soapGetDosar, supabaseAdmin }) {
   }
 }
 
-module.exports = { init, _intern: { stare, tick, verifica, valideaza, linkBanner, semnatura, inLiniste, mesajPana, mesajRevenire, aprindeBanner, stingeBanner, trimiteRezumatDimineata, MESAJ_BANNER } }
+module.exports = { init, _intern: { stare, tick, trimiteEmail, verifica, valideaza, linkBanner, semnatura, inLiniste, mesajPana, mesajRevenire, aprindeBanner, stingeBanner, trimiteRezumatDimineata, MESAJ_BANNER } }
