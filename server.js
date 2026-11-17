@@ -252,6 +252,10 @@ app.post('/delete-account', async (req, res) => {
   }
 })
 
+// Canar portal.just.ro (canar-portal.js) — rutele butoanelor din email se inregistreaza
+// INAINTE de requireAuth (linkurile sunt semnate, nu au token de utilizator).
+require('./canar-portal').init({ app, cron, soapGetDosar, supabaseAdmin })
+
 app.use(requireAuth)
 
 // Formatul roman: 1-6 cifre / 1-4 cifre / 4 cifre (ex: 1234/299/2023)
