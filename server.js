@@ -1064,52 +1064,68 @@ function foldNume(s) {
 }
 
 async function getDosarePortal(numeParte) {
-  const xml = await httpPost(soapRequestNumeParte(numeParte))
-  const dosareBlocks = extractAll(xml, 'Dosar')
+  // Portalul trateaza punctele dupa reguli proprii: forma ANAF "IMPACTTED RISE S.R.L." gaseste
+  // 0 dosare, "IMPACTTED RISE SRL" gaseste 3 (masurat 2026-11-17). Dar nici forma fara puncte
+  // nu e superset: partile scrise "AQUATIM S.A" apar DOAR la cautarea cu puncte. De aceea
+  // cautam AMBELE forme si unim: rezultatul nu poate fi mai mic decat cautarea originala.
+  const faraPuncte = String(numeParte).replace(/\./g, '').replace(/\s+/g, ' ').trim()
+  const cereri = [numeParte]
+  if (faraPuncte && faraPuncte !== numeParte) cereri.push(faraPuncte)
+  const raspunsuri = await Promise.allSettled(cereri.map(n => httpPost(soapRequestNumeParte(n))))
+  const xmls = raspunsuri.filter(r => r.status === 'fulfilled').map(r => r.value)
+  if (xmls.length === 0) throw raspunsuri[0].reason   // ca inainte: portal indisponibil
+
   const qUpper = foldNume(numeParte)
   const acum = new Date()
   const rezultate = []
+  const dinPrima = new Set()   // dosarele deja numarate din primul raspuns (cheie: numar|instanta)
   let total = 0
 
-  for (const b of dosareBlocks) {
-    const numar = extractOne(b, 'numar')
-    if (!numar) continue
+  xmls.forEach((xml, idx) => {
+    for (const b of extractAll(xml, 'Dosar')) {
+      const numar = extractOne(b, 'numar')
+      if (!numar) continue
 
-    const partiBlocks = extractAll(b, 'DosarParte')
-    const parteGasita = partiBlocks.find(p => {
-      const n = extractOne(p, 'nume') || ''
-      return foldNume(n).includes(qUpper)
-    })
-    if (!parteGasita) continue
+      const partiBlocks = extractAll(b, 'DosarParte')
+      const parteGasita = partiBlocks.find(p => {
+        const n = extractOne(p, 'nume') || ''
+        return foldNume(n).includes(qUpper)
+      })
+      if (!parteGasita) continue
 
-    const calitate = extractOne(parteGasita, 'calitateParte') || null
+      const cheie = numar + '|' + (extractOne(b, 'institutie') || '')
+      if (idx === 0) dinPrima.add(cheie)
+      else if (dinPrima.has(cheie)) continue   // deja numarat din primul raspuns
 
-    const sedinteBlocks = extractAll(b, 'DosarSedinta')
-    const viitoare = sedinteBlocks
-      .map(s => ({ data: extractOne(s, 'data'), ora: extractOne(s, 'ora') }))
-      .filter(s => s.data && new Date(s.data) >= acum)
-      .sort((a, b) => new Date(a.data) - new Date(b.data))
+      const calitate = extractOne(parteGasita, 'calitateParte') || null
 
-    total++
-    if (rezultate.length >= 50) continue
+      const sedinteBlocks = extractAll(b, 'DosarSedinta')
+      const viitoare = sedinteBlocks
+        .map(s => ({ data: extractOne(s, 'data'), ora: extractOne(s, 'ora') }))
+        .filter(s => s.data && new Date(s.data) >= acum)
+        .sort((a, b) => new Date(a.data) - new Date(b.data))
 
-    rezultate.push({
-      numar,
-      // Numele EXACT al partii, asa cum il scrie portalul. Clientul grupeaza dupa el,
-      // ca sa se vada ca "AQUA TERRA CONSTRUCTII SRL" e alta firma decat cea cautata,
-      // si ca "... PRIN LICHIDATOR JUDICIAR" e aceeasi firma in alta faza.
-      nume_parte: extractOne(parteGasita, 'nume') || null,
-      instanta: extractOne(b, 'institutie'),
-      obiect: extractOne(b, 'obiect'),
-      stadiu: extractOne(b, 'stadiuProcesual'),
-      calitate_firma: calitate,
-      urmator_termen: viitoare[0] || null,
-    })
+      total++
+      if (rezultate.length >= 50) continue
 
-    // Plafon ridicat de la 20 la 50: dupa normalizarea diacriticelor o firma reala
-    // poate avea legitim 30-40 de dosare (masurat: 36). Cu plafonul vechi, fixul ar
-    // fi inlocuit "1 dosar gresit" cu "20 din 36, tacut" — alta forma a aceleiasi minciuni.
-  }
+      rezultate.push({
+        numar,
+        // Numele EXACT al partii, asa cum il scrie portalul. Clientul grupeaza dupa el,
+        // ca sa se vada ca "AQUA TERRA CONSTRUCTII SRL" e alta firma decat cea cautata,
+        // si ca "... PRIN LICHIDATOR JUDICIAR" e aceeasi firma in alta faza.
+        nume_parte: extractOne(parteGasita, 'nume') || null,
+        instanta: extractOne(b, 'institutie'),
+        obiect: extractOne(b, 'obiect'),
+        stadiu: extractOne(b, 'stadiuProcesual'),
+        calitate_firma: calitate,
+        urmator_termen: viitoare[0] || null,
+      })
+
+      // Plafon ridicat de la 20 la 50: dupa normalizarea diacriticelor o firma reala
+      // poate avea legitim 30-40 de dosare (masurat: 36). Cu plafonul vechi, fixul ar
+      // fi inlocuit "1 dosar gresit" cu "20 din 36, tacut" — alta forma a aceleiasi minciuni.
+    }
+  })
 
   // Nu mai iesim din bucla la 50: continuam sa NUMARAM potrivirile ca sa putem spune
   // "50 din 143" in loc sa taiem tacut. Zero interogari in plus — raspunsul portalului
