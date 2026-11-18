@@ -601,7 +601,12 @@ function extractOne(xml, tag) {
 
 async function soapGetDosar(numarDosar) {
   const xml = await httpPost(soapRequest(numarDosar))
+  return parseazaDosarSoap(xml)
+}
 
+// Citirea raspunsului SOAP al unui dosar — scoasa din soapGetDosar NESCHIMBATA (2026-11-18),
+// ca /import-portal sa produca sedintele IDENTIC cu sincronizarea (acelasi cod → fara dubluri).
+function parseazaDosarSoap(xml) {
   // Acelasi numar poate intoarce mai multe dosare (fond + apel) — fiecare sedinta
   // pastreaza instanta si stadiul blocului ei. Ordinea sedintelor ramane cea din XML.
   // Campurile noi (solutieSumar, dataPronuntare, numarDocument, instanta, stadiu) se
@@ -709,7 +714,9 @@ app.post('/sync-soap', async (req, res) => {
   const userId = req.user?.id
   if (userId) {
     const last = lastSyncPerUser.get(userId) || 0
-    if (Date.now() - last < SYNC_COOLDOWN_MS) return res.json({ rezultate: [] })
+    // `pauza`: nu a avut loc nicio sincronizare — aplicatiile noi NU schimba ora „actualizat”;
+    // aplicatiile vechi ignora campul (citesc doar `rezultate`).
+    if (Date.now() - last < SYNC_COOLDOWN_MS) return res.json({ rezultate: [], pauza: true })
     lastSyncPerUser.set(userId, Date.now())
   }
 
@@ -731,11 +738,143 @@ app.post('/sync-soap', async (req, res) => {
         return { numar_dosar: numarCurat, sedinte, parti }
       } catch (e) {
         console.log(`[soap] Eroare ${numarCurat}: ${e.message}`)
-        return { numar_dosar: numarCurat, sedinte: [], parti: [] }
+        // `error`: portalul nu a raspuns pentru acest dosar (≠ dosar fara sedinte). Aplicatiile noi
+        // nu il aplica si nu il numara reusit; cele vechi ignora campul, ca la 'Format invalid'.
+        return { numar_dosar: numarCurat, sedinte: [], parti: [], error: 'portal' }
       }
     })
   )
 
+  res.json({ rezultate })
+})
+
+// ─── Detaliile unui dosar pentru Due Diligence (desfacere la apasare, build 1.3.3/1.0.12) ──
+// Un singur apel SOAP, la cererea avocatului; NIMIC stocat (Politica §7.7).
+// `institutie` = codul brut al instantei din cardul DD (getDosarePortal: extractOne(bloc, 'institutie')).
+// Acelasi numar poate exista la fond si la apel → intoarcem doar blocul instantei cerute.
+// Niciun bloc potrivit (portalul s-a schimbat intre timp) → toate blocurile, nu un raspuns gol fals.
+async function detaliiDosarPortal(numarDosar, institutie) {
+  const xml = await httpPost(soapRequest(numarDosar))
+  const blocuri = extractAll(xml, 'Dosar')
+  const potrivite = institutie ? blocuri.filter(b => (extractOne(b, 'institutie') || '') === institutie) : []
+  const alese = potrivite.length > 0 ? potrivite : blocuri
+
+  const parti = []
+  const vazute = new Set()
+  const sedinte = []
+  for (const bloc of alese) {
+    const scalar = bloc
+      .replace(/<parti>[\s\S]*?<\/parti>/g, '')
+      .replace(/<sedinte>[\s\S]*?<\/sedinte>/g, '')
+    const instanta = formatInstitutie(extractOne(scalar, 'institutie'))
+    for (const p of extractAll(bloc, 'DosarParte')) {
+      const nume = extractOne(p, 'nume')
+      if (!nume) continue
+      const calitate = extractOne(p, 'calitateParte') || null
+      const cheie = nume + '|' + (calitate || '')
+      if (vazute.has(cheie)) continue
+      vazute.add(cheie)
+      parti.push({ nume, calitate })
+    }
+    for (const s of extractAll(bloc, 'DosarSedinta')) {
+      const data = (extractOne(s, 'data') || '').split('T')[0]
+      if (!data) continue
+      sedinte.push({
+        data,
+        ora: extractOne(s, 'ora') || null,
+        solutie: extractOne(s, 'solutie') || null,
+        solutieSumar: extractOne(s, 'solutieSumar') || null,
+        instanta,
+      })
+    }
+  }
+  // Cele mai noi primele (data, apoi ora)
+  sedinte.sort((a, b) => (b.data + (b.ora || '')).localeCompare(a.data + (a.ora || '')))
+  const cuSolutie = sedinte.find(s => s.solutie)
+  const solutie = cuSolutie ? { data: cuSolutie.data, solutie: cuSolutie.solutie, solutieSumar: cuSolutie.solutieSumar } : null
+  return { parti, sedinte, solutie }
+}
+
+app.post('/detalii-dosar', async (req, res) => {
+  const numar = sanitizeNumarDosar(req.body?.numar_dosar)
+  if (!numar) return res.json({ error: 'Format invalid' })
+  const institutie = typeof req.body?.institutie === 'string' ? req.body.institutie.trim().slice(0, 200) : ''
+  try {
+    const detalii = await detaliiDosarPortal(numar, institutie)
+    console.log(`[detalii] ${numar} → ${detalii.sedinte.length} sedinte, ${detalii.parti.length} parti`)
+    res.json(detalii)
+  } catch (e) {
+    console.log(`[detalii] Eroare ${numar}: ${e.message}`)
+    res.json({ error: 'portal' })
+  }
+})
+
+// ─── Import din Excel cu date de pe portal (build 1.3.3/1.0.12) ──────────────────────────
+// Aplicatia trimite pachete de max 10 numere; pentru fiecare: gasit/negasit, instanta (D1a:
+// blocul cu cea mai recenta sedinta), obiect, materie, parti cu calitate si sedintele IN
+// FORMATUL SINCRONIZARII (parseazaDosarSoap) → aplicatia le trece prin aplicaSincronizarea.
+// Nimic stocat. Fara pauza de 1h a sincronizarii (alt drum); anti-abuz: max 400 numere/ora/cont.
+const IMPORT_MAX_PE_CERERE = 10
+const IMPORT_MAX_PE_ORA = 400
+const importPeCont = new Map() // userId → { start, numar }
+
+app.post('/import-portal', async (req, res) => {
+  const lista = Array.isArray(req.body?.dosare) ? req.body.dosare.slice(0, IMPORT_MAX_PE_CERERE) : []
+  if (lista.length === 0) return res.json({ rezultate: [] })
+
+  const userId = req.user?.id
+  if (userId) {
+    const acum = Date.now()
+    let c = importPeCont.get(userId)
+    if (!c || acum - c.start > 60 * 60 * 1000) { c = { start: acum, numar: 0 }; importPeCont.set(userId, c) }
+    if (c.numar + lista.length > IMPORT_MAX_PE_ORA) return res.json({ rezultate: [], limita: true })
+    c.numar += lista.length
+  }
+
+  const rezultate = await Promise.all(lista.map(async numar => {
+    const numarCurat = sanitizeNumarDosar(numar)
+    if (!numarCurat) return { numar_dosar: numar, gasit: false, error: 'Format invalid' }
+    try {
+      const xml = await httpPost(soapRequest(numarCurat))
+      const blocuri = extractAll(xml, 'Dosar')
+      if (blocuri.length === 0) return { numar_dosar: numarCurat, gasit: false }
+
+      const { sedinte, parti } = parseazaDosarSoap(xml)
+
+      let ales = blocuri[0]
+      let ultima = ''
+      for (const b of blocuri) {
+        const d = extractAll(b, 'DosarSedinta').map(s => (extractOne(s, 'data') || '').split('T')[0]).sort().pop() || ''
+        if (d > ultima) { ultima = d; ales = b }
+      }
+      const scalar = ales
+        .replace(/<parti>[\s\S]*?<\/parti>/g, '')
+        .replace(/<sedinte>[\s\S]*?<\/sedinte>/g, '')
+
+      const vazute = new Set()
+      const partiUnice = parti.filter(p => {
+        const k = p.nume + '|' + (p.calitate || '')
+        if (vazute.has(k)) return false
+        vazute.add(k)
+        return true
+      })
+
+      return {
+        numar_dosar: numarCurat,
+        gasit: true,
+        instanta: formatInstitutie(extractOne(scalar, 'institutie')),
+        obiect: extractOne(scalar, 'obiect') || null,
+        materie: extractOne(scalar, 'categorieCazNume') || extractOne(scalar, 'categorieCaz') || null,
+        parti: partiUnice,
+        sedinte,
+      }
+    } catch (e) {
+      console.log(`[import] Eroare ${numarCurat}: ${e.message}`)
+      return { numar_dosar: numarCurat, gasit: false, error: 'portal' }
+    }
+  }))
+
+  console.log(`[import] ${lista.length} numere → ${rezultate.filter(r => r.gasit).length} gasite`)
   res.json({ rezultate })
 })
 
