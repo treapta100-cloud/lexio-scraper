@@ -532,10 +532,10 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOStrin
 // Portalul raspunde UNEORI gol pentru dosare care exista (dovedit 18 nov 2026 pe dosarele unui avocat:
 // „0 rezultate” → la aceeasi intrebare, dupa 4 s / ~1,5 min, gasit). La raspuns GOL mai intrebam de
 // `reincercari` ori, la `pauzaMs`. O EROARE nu se reincearca (o pana reala nu trebuie lungita).
-// /cauta-dosar: 1 reincercare la 2 s (avocatul asteapta pe ecran, ~3,5 s la un numar gresit; golurile
-// lungi le acopera mesajul din aplicatie + „Caută din nou”). /import-portal: 2 la 2,5 s (nimeni nu
-// asteapta un numar anume, iar un dosar real sarit costa mult). Sincronizarea nu (gol = „nimic nou”).
-const GOL_CAUTARE = { reincercari: 1, pauzaMs: 2000 }
+// Doar /import-portal: 2 la 2,5 s (nimeni nu asteapta un numar anume, iar un dosar real sarit costa mult).
+// /cauta-dosar NU (decizie 21 nov): de pe Railway portalul raspunde in ~2,4 s/intrebare, deci o
+// reincercare ar tine avocatul ~7 s fara explicatie; aplicatia noua reincearca VIZIBIL („mai verific o
+// data…”) + mesaj corect + „Caută din nou”. Sincronizarea nu (gol = „nimic nou”).
 const GOL_IMPORT = { reincercari: 2, pauzaMs: 2500 }
 async function cuReincercareLaGol(intreaba, eGol, eticheta, { reincercari, pauzaMs }) {
   let rezultat = await intreaba()
@@ -554,7 +554,7 @@ app.post('/cauta-dosar', async (req, res) => {
   }
 
   try {
-    const rezultate = await cuReincercareLaGol(() => cautaDosarSoap(numar_dosar), r => r.length === 0, numar_dosar, GOL_CAUTARE)
+    const rezultate = await cautaDosarSoap(numar_dosar)
     console.log(`[cauta] ${numar_dosar} → ${rezultate.length} rezultate`)
     res.json({ rezultate })
   } catch (err) {
