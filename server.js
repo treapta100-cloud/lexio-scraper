@@ -529,6 +529,24 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOStrin
 // Motiv: scraping-ul paginii s-a rupt cand portalul si-a schimbat structura (cod
 // neatins din 22.04.2026) si a picat tacut — niciun rezultat, nicio eroare.
 // API-ul intoarce aceleasi campuri, structurat, in ~50ms in loc de ~20s.
+// Portalul raspunde UNEORI gol pentru dosare care exista (dovedit 18 nov 2026 pe dosarele unui avocat:
+// „0 rezultate” → la aceeasi intrebare, dupa 4 s / ~1,5 min, gasit). La raspuns GOL mai intrebam de
+// `reincercari` ori, la `pauzaMs`. O EROARE nu se reincearca (o pana reala nu trebuie lungita).
+// /cauta-dosar: 1 reincercare la 2 s (avocatul asteapta pe ecran, ~3,5 s la un numar gresit; golurile
+// lungi le acopera mesajul din aplicatie + „Caută din nou”). /import-portal: 2 la 2,5 s (nimeni nu
+// asteapta un numar anume, iar un dosar real sarit costa mult). Sincronizarea nu (gol = „nimic nou”).
+const GOL_CAUTARE = { reincercari: 1, pauzaMs: 2000 }
+const GOL_IMPORT = { reincercari: 2, pauzaMs: 2500 }
+async function cuReincercareLaGol(intreaba, eGol, eticheta, { reincercari, pauzaMs }) {
+  let rezultat = await intreaba()
+  for (let i = 1; i <= reincercari && eGol(rezultat); i++) {
+    await new Promise(r => setTimeout(r, pauzaMs))
+    rezultat = await intreaba()
+    console.log(`[gol-fals] ${eticheta} reincercarea ${i} → ${eGol(rezultat) ? 'tot gol' : 'GASIT'}`)
+  }
+  return rezultat
+}
+
 app.post('/cauta-dosar', async (req, res) => {
   const numar_dosar = sanitizeNumarDosar(req.body?.numar_dosar)
   if (!numar_dosar) {
@@ -536,7 +554,7 @@ app.post('/cauta-dosar', async (req, res) => {
   }
 
   try {
-    const rezultate = await cautaDosarSoap(numar_dosar)
+    const rezultate = await cuReincercareLaGol(() => cautaDosarSoap(numar_dosar), r => r.length === 0, numar_dosar, GOL_CAUTARE)
     console.log(`[cauta] ${numar_dosar} → ${rezultate.length} rezultate`)
     res.json({ rezultate })
   } catch (err) {
@@ -835,7 +853,7 @@ app.post('/import-portal', async (req, res) => {
     const numarCurat = sanitizeNumarDosar(numar)
     if (!numarCurat) return { numar_dosar: numar, gasit: false, error: 'Format invalid' }
     try {
-      const xml = await httpPost(soapRequest(numarCurat))
+      const xml = await cuReincercareLaGol(() => httpPost(soapRequest(numarCurat)), x => extractAll(x, 'Dosar').length === 0, numarCurat, GOL_IMPORT)
       const blocuri = extractAll(xml, 'Dosar')
       if (blocuri.length === 0) return { numar_dosar: numarCurat, gasit: false }
 
